@@ -1,0 +1,94 @@
+{
+  "session_name": "dnd_2",
+  "language": "ru",
+
+  "quality_profile": "balanced",
+
+  "transcription_backend": "mlx",
+  "model_size": "mlx-community/whisper-large-v3-turbo",
+
+  "device": "cpu",
+  "compute_type": "int8",
+
+  "use_vad": true,
+  "vad_min_silence_ms": 800,
+  "beam_size": 5,
+  "condition_on_previous_text": false,
+
+  "preprocess": {
+    "enabled": true,
+    "sample_rate": 16000,
+    "channels": 1,
+
+    "highpass_enabled": true,
+    "highpass_hz": 80,
+
+    "lowpass_enabled": false,
+    "lowpass_hz": 12000,
+
+    "denoise_enabled": true,
+    "denoise_noise_floor_db": -25,
+
+    "noise_gate_enabled": true,
+    "noise_gate_threshold_db": -45,
+    "noise_gate_ratio": 6,
+    "noise_gate_attack_ms": 10,
+    "noise_gate_release_ms": 250,
+
+    "loudnorm_enabled": false,
+    "loudnorm_i": -18,
+    "loudnorm_tp": -2,
+    "loudnorm_lra": 11
+  },
+
+  "master_mix": "dnd_2-001.wav",
+
+  "tracks": [
+    {"file": "dnd_2-Данжен Мастер.wav", "speaker": "Данжен Мастер", "character": "ДМ", "priority": 100},
+    {"file": "dnd_2-Дима. Ангрон.wav", "speaker": "Дима", "character": "Ангрон", "priority": 50},
+    {"file": "dnd_2-Антернер.wav", "speaker": "Антернер", "character": "Антернер", "priority": 50},
+    {"file": "dnd_2-Шиян.wav", "speaker": "Шиян", "character": "Шиян", "priority": 50},
+    {"file": "dnd_2-Гай Гексан.wav", "speaker": "Гай Гексан", "character": "Гай Гексан", "priority": 50},
+    {"file": "dnd_2-Алкюр Септик.wav", "speaker": "Алкюр Септик", "character": "Алкюр Септик", "priority": 50}
+  ],
+
+  "hallucination_filter": {
+    "enabled": true,
+    "mode": "balanced",
+    "drop_blacklisted_phrases": true,
+    "drop_repeated_words": true,
+    "drop_high_compression": true,
+    "drop_low_rms": true,
+    "max_compression_ratio": 4.0,
+    "very_high_compression_ratio": 8.0,
+    "low_rms_db": -78,
+    "min_chars_for_low_rms_keep": 18,
+    "blacklist": [
+      "Спасибо.",
+      "Продолжение следует...",
+      "Субтитры создавал",
+      "Добавил субтитры",
+      "DimaTorzok",
+      "Питер Каватый"
+    ],
+    "keep_short_reactions": true,
+    "short_reaction_max_chars": 8
+  },
+
+  "dedupe": {
+    "enabled": true,
+    "min_text_len": 20,
+    "min_overlap_ratio": 0.45,
+    "similarity_threshold": 0.84,
+    "search_back_segments": 40,
+    "prefer_louder_by_db": 3.0
+  },
+
+  "postprocess": {
+    "merge_adjacent_same_speaker": true,
+    "merge_max_gap_sec": 1.1,
+    "merge_max_merged_chars": 420
+  },
+
+  "chunk_minutes": 10
+}

@@ -1,0 +1,37 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Session data (real recordings, transcripts, personal data)
+may/
+*.wav
+*.mp3
+*.m4a
+config.json
+
+# Pipeline output (generated files, may contain personal data)
+_dnd_pipeline_out/
+
+# Environment
+.env
+.env.*
