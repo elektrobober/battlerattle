@@ -759,6 +759,11 @@ def discover_tracks(session_dir: Path, config: dict[str, Any]) -> list[dict[str,
             "character": character,
             "priority": 100 if speaker == dm_speaker else 50,
         })
+    if not tracks:
+        logger.warning(
+            f"Не найдено аудиодорожек в {session_dir} "
+            f"(расширения: {sorted(extensions)}). Проверь папку, audio_extensions и exclude."
+        )
     return tracks
 
 

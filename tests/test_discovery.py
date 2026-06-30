@@ -129,3 +129,20 @@ def test_transcribe_all_uses_discovery_when_no_tracks(tmp_path, monkeypatch):
 
     dp.transcribe_all(tmp_path, cfg, paths)
     assert sorted(seen) == ["Дима", "Шиян"]
+
+
+def test_empty_discovery_logs_warning(tmp_path, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="dnd_pipeline"):
+        out = dp.discover_tracks(tmp_path, {"session_name": "dnd_2"})
+    assert out == []
+    assert any("Не найдено аудиодорожек" in r.message and r.levelno == logging.WARNING
+               for r in caplog.records)
+
+
+def test_nonempty_discovery_no_warning(tmp_path, caplog):
+    import logging
+    (tmp_path / "dnd_2-Шиян.wav").write_bytes(b"")
+    with caplog.at_level(logging.WARNING, logger="dnd_pipeline"):
+        dp.discover_tracks(tmp_path, {"session_name": "dnd_2"})
+    assert not any("Не найдено аудиодорожек" in r.message for r in caplog.records)
