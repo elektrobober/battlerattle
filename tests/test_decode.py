@@ -120,6 +120,7 @@ def test_mlx_transcribe_forwards_decode_options(monkeypatch):
     assert stub.captured["logprob_threshold"] == -1.0
     assert stub.captured["no_speech_threshold"] == 0.6
     assert stub.captured["initial_prompt"] == "Партия: Ангрон."
+    assert "log_prob_threshold" not in stub.captured
 
 
 class _FakeFWModel:
@@ -142,3 +143,4 @@ def test_faster_transcribe_forwards_decode_options():
     assert model.captured["condition_on_previous_text"] is False
     assert model.captured["log_prob_threshold"] == -0.8
     assert "logprob_threshold" not in model.captured
+    assert model.captured["word_timestamps"] is False
