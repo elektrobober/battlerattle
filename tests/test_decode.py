@@ -58,3 +58,39 @@ def test_mlx_alias_normalization():
     cfg = {"decode": {"logprob_threshold": -1.0}}
     assert "logprob_threshold" in dp.resolve_decode_options(cfg, "mlx-whisper")
     assert "logprob_threshold" in dp.resolve_decode_options(cfg, "mlx_whisper")
+
+
+def test_balanced_profile_injects_decode_defaults():
+    cfg = dp.apply_quality_profile({"quality_profile": "balanced"})
+    assert cfg["decode"]["no_speech_threshold"] == 0.6
+    assert cfg["decode"]["condition_on_previous_text"] is False
+
+
+def test_aggressive_profile_is_stricter():
+    cfg = dp.apply_quality_profile({"quality_profile": "aggressive"})
+    assert cfg["decode"]["compression_ratio_threshold"] == 2.2
+    assert cfg["decode"]["hallucination_silence_threshold"] == 1.0
+
+
+def test_gentle_profile_is_more_lenient():
+    cfg = dp.apply_quality_profile({"quality_profile": "gentle"})
+    assert cfg["decode"]["hallucination_silence_threshold"] == 5.0
+    assert cfg["decode"]["logprob_threshold"] == -1.2
+
+
+def test_user_decode_override_beats_profile_default():
+    cfg = dp.apply_quality_profile({
+        "quality_profile": "balanced",
+        "decode": {"no_speech_threshold": 0.9},
+    })
+    assert cfg["decode"]["no_speech_threshold"] == 0.9
+    # untouched keys still come from the profile
+    assert cfg["decode"]["compression_ratio_threshold"] == 2.4
+
+
+def test_user_initial_prompt_survives_profile_merge():
+    cfg = dp.apply_quality_profile({
+        "quality_profile": "balanced",
+        "decode": {"initial_prompt": "Партия: Ангрон, Шиян."},
+    })
+    assert cfg["decode"]["initial_prompt"] == "Партия: Ангрон, Шиян."

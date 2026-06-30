@@ -132,6 +132,14 @@ def apply_quality_profile(cfg: dict[str, Any]) -> dict[str, Any]:
                 "min_text_len": 24, "prefer_louder_by_db": 4.5,
             },
             "postprocess": {"repair_timings": True, "merge_adjacent_same_speaker": True, "merge_max_gap_sec": 0.9},
+            "decode": {
+                "condition_on_previous_text": False,
+                "compression_ratio_threshold": 2.6,
+                "logprob_threshold": -1.2,
+                "no_speech_threshold": 0.7,
+                "hallucination_silence_threshold": 5.0,
+                "initial_prompt": None,
+            },
         },
         "balanced": {
             "preprocess": {
@@ -146,6 +154,14 @@ def apply_quality_profile(cfg: dict[str, Any]) -> dict[str, Any]:
                 "min_text_len": 20, "prefer_louder_by_db": 3.0,
             },
             "postprocess": {"repair_timings": True, "merge_adjacent_same_speaker": True, "merge_max_gap_sec": 1.1},
+            "decode": {
+                "condition_on_previous_text": False,
+                "compression_ratio_threshold": 2.4,
+                "logprob_threshold": -1.0,
+                "no_speech_threshold": 0.6,
+                "hallucination_silence_threshold": 2.0,
+                "initial_prompt": None,
+            },
         },
         "aggressive": {
             "preprocess": {
@@ -160,6 +176,14 @@ def apply_quality_profile(cfg: dict[str, Any]) -> dict[str, Any]:
                 "min_text_len": 18, "prefer_louder_by_db": 2.0,
             },
             "postprocess": {"repair_timings": True, "merge_adjacent_same_speaker": True, "merge_max_gap_sec": 1.4},
+            "decode": {
+                "condition_on_previous_text": False,
+                "compression_ratio_threshold": 2.2,
+                "logprob_threshold": -0.8,
+                "no_speech_threshold": 0.5,
+                "hallucination_silence_threshold": 1.0,
+                "initial_prompt": None,
+            },
         },
     }
     if profile not in profiles:
