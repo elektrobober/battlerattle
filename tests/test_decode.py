@@ -94,3 +94,51 @@ def test_user_initial_prompt_survives_profile_merge():
         "decode": {"initial_prompt": "Партия: Ангрон, Шиян."},
     })
     assert cfg["decode"]["initial_prompt"] == "Партия: Ангрон, Шиян."
+
+
+class _CaptureMLX:
+    """Stub standing in for the mlx_whisper module."""
+    def __init__(self):
+        self.captured = None
+
+    def transcribe(self, audio, **kwargs):
+        self.captured = kwargs
+        return {"segments": []}
+
+
+def test_mlx_transcribe_forwards_decode_options(monkeypatch):
+    stub = _CaptureMLX()
+    monkeypatch.setattr(dp, "mlx_whisper", stub)
+    cfg = dp.apply_quality_profile({
+        "quality_profile": "balanced",
+        "transcription_backend": "mlx",
+        "language": "ru",
+        "decode": {"initial_prompt": "Партия: Ангрон."},
+    })
+    dp.run_mlx_transcribe(__import__("pathlib").Path("x.wav"), cfg)
+    assert stub.captured["condition_on_previous_text"] is False
+    assert stub.captured["logprob_threshold"] == -1.0
+    assert stub.captured["no_speech_threshold"] == 0.6
+    assert stub.captured["initial_prompt"] == "Партия: Ангрон."
+
+
+class _FakeFWModel:
+    def __init__(self):
+        self.captured = None
+
+    def transcribe(self, audio, **kwargs):
+        self.captured = kwargs
+        return [], object()
+
+
+def test_faster_transcribe_forwards_decode_options():
+    model = _FakeFWModel()
+    cfg = dp.apply_quality_profile({
+        "quality_profile": "aggressive",
+        "transcription_backend": "faster_whisper",
+        "language": "ru",
+    })
+    dp.run_faster_whisper_transcribe(model, __import__("pathlib").Path("x.wav"), cfg)
+    assert model.captured["condition_on_previous_text"] is False
+    assert model.captured["log_prob_threshold"] == -0.8
+    assert "logprob_threshold" not in model.captured

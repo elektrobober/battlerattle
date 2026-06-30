@@ -415,6 +415,7 @@ def run_mlx_transcribe(audio_path: Path, config: dict[str, Any]) -> list[dict[st
         path_or_hf_repo=model,
         language=language,
         verbose=False,
+        **resolve_decode_options(config, "mlx"),
     )
     segments = result.get("segments") or []
     return [normalize_segment_from_mlx(s) for s in segments]
@@ -426,9 +427,9 @@ def run_faster_whisper_transcribe(model: Any, audio_path: Path, config: dict[str
         vad_filter=bool(config.get("use_vad", True)),
         vad_parameters={"min_silence_duration_ms": int(config.get("vad_min_silence_ms", 800))},
         beam_size=int(config.get("beam_size", 5)),
-        condition_on_previous_text=bool(config.get("condition_on_previous_text", False)),
         word_timestamps=False,
     )
+    kwargs.update(resolve_decode_options(config, "faster_whisper"))
     segments, info = model.transcribe(str(audio_path), **kwargs)
     rows = []
     for seg in segments:
