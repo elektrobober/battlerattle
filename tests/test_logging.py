@@ -33,3 +33,22 @@ def test_configure_is_idempotent_no_handler_stacking():
 def test_propagation_stays_enabled():
     dp.configure_logging(verbose=False, quiet=False)
     assert dp.logger.propagate is True
+
+
+def test_main_verbose_flag_sets_debug_level():
+    # The "run" command will fail (no such dir), but logging is configured first.
+    rc = dp.main(["run", "/nonexistent/session/dir", "--verbose"])
+    assert rc == 1
+    assert dp.logger.level == logging.DEBUG
+
+
+def test_main_quiet_flag_sets_warning_level():
+    rc = dp.main(["run", "/nonexistent/session/dir", "--quiet"])
+    assert rc == 1
+    assert dp.logger.level == logging.WARNING
+
+
+def test_main_default_is_info_level():
+    rc = dp.main(["run", "/nonexistent/session/dir"])
+    assert rc == 1
+    assert dp.logger.level == logging.INFO

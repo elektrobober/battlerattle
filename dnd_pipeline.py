@@ -1472,9 +1472,15 @@ def cmd_build_report(args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="D&D PodTrak local pipeline")
+
+    verbosity = argparse.ArgumentParser(add_help=False)
+    vgroup = verbosity.add_mutually_exclusive_group()
+    vgroup.add_argument("--verbose", "-v", action="store_true", help="show per-line transcript and debug detail")
+    vgroup.add_argument("--quiet", "-q", action="store_true", help="only warnings and errors")
+
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_run = sub.add_parser("run", help="full pipeline: transcribe → clean → chunks → prompts")
+    p_run = sub.add_parser("run", parents=[verbosity], help="full pipeline: transcribe → clean → chunks → prompts")
     p_run.add_argument("session_dir", help="folder with PodTrak wav files")
     p_run.add_argument("--config", help="path to config.json")
     p_run.add_argument("--backend", choices=["faster_whisper", "mlx"], help="override transcription_backend")
@@ -1483,26 +1489,27 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--quality-profile", choices=["gentle", "balanced", "aggressive"], help="override quality_profile")
     p_run.set_defaults(func=cmd_run)
 
-    p_rebuild = sub.add_parser("rebuild", help="rebuild clean/chunks/prompts from existing raw JSONL; no transcription")
+    p_rebuild = sub.add_parser("rebuild", parents=[verbosity], help="rebuild clean/chunks/prompts from existing raw JSONL; no transcription")
     p_rebuild.add_argument("session_dir", help="folder with session files")
     p_rebuild.add_argument("--config", help="path to config.json")
     p_rebuild.add_argument("--limit-minutes", type=float, help="use *_test_raw.jsonl if rebuilding a test run")
     p_rebuild.add_argument("--quality-profile", choices=["gentle", "balanced", "aggressive"], help="override quality_profile")
     p_rebuild.set_defaults(func=cmd_rebuild)
 
-    p_ai = sub.add_parser("prepare-ai", help="create chunks and manual AI prompts from clean.jsonl")
+    p_ai = sub.add_parser("prepare-ai", parents=[verbosity], help="create chunks and manual AI prompts from clean.jsonl")
     p_ai.add_argument("session_dir", help="folder with session files")
     p_ai.add_argument("--config", help="path to config.json")
     p_ai.add_argument("--quality-profile", choices=["gentle", "balanced", "aggressive"], help="override quality_profile")
     p_ai.set_defaults(func=cmd_prepare_ai)
 
-    p_report = sub.add_parser("build-report", help="build reports from manual_ai_results/*.json")
+    p_report = sub.add_parser("build-report", parents=[verbosity], help="build reports from manual_ai_results/*.json")
     p_report.add_argument("session_dir", help="folder with session files")
     p_report.add_argument("--config", help="path to config.json")
     p_report.add_argument("--quality-profile", choices=["gentle", "balanced", "aggressive"], help="override quality_profile")
     p_report.set_defaults(func=cmd_build_report)
 
     args = parser.parse_args(argv)
+    configure_logging(getattr(args, "verbose", False), getattr(args, "quiet", False))
     try:
         args.func(args)
         return 0
