@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import math
 import re
 import shutil
@@ -41,6 +42,33 @@ try:
     import mlx_whisper
 except Exception:  # pragma: no cover
     mlx_whisper = None
+
+
+logger = logging.getLogger("dnd_pipeline")
+
+
+def configure_logging(verbose: bool, quiet: bool) -> int:
+    """Install a single stdout handler on the module logger and set its level.
+
+    verbose → DEBUG, quiet → WARNING, neither → INFO. verbose wins if both set.
+    Idempotent: clears prior handlers so repeated calls (e.g. in tests) do not
+    stack. Leaves propagation enabled so pytest caplog can capture records.
+    """
+    if verbose:
+        level = logging.DEBUG
+    elif quiet:
+        level = logging.WARNING
+    else:
+        level = logging.INFO
+
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(level)
+    logger.propagate = True
+    return level
 
 
 # ──────────────────────────────────────────────────────────────
