@@ -92,3 +92,17 @@ def test_results_sorted_by_filename(tmp_path):
         touch(tmp_path, n)
     out = dp.discover_tracks(tmp_path, {"session_name": "dnd_2"})
     assert [t["file"] for t in out] == ["dnd_2-A.wav", "dnd_2-B.wav", "dnd_2-C.wav"]
+
+
+def test_two_dot_separators_split_on_first_only(tmp_path):
+    touch(tmp_path, "dnd_2-Дима. Ангрон. Прочее.wav")
+    out = dp.discover_tracks(tmp_path, {"session_name": "dnd_2"})
+    assert out[0]["speaker"] == "Дима"
+    assert out[0]["character"] == "Ангрон. Прочее"
+
+
+def test_file_without_prefix_kept_intact(tmp_path):
+    touch(tmp_path, "Безпрефикса.wav")
+    out = dp.discover_tracks(tmp_path, {"session_name": "dnd_2"})
+    assert out[0]["speaker"] == "Безпрефикса"
+    assert out[0]["character"] == "Безпрефикса"
