@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 import wave
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -222,8 +223,12 @@ def apply_quality_profile(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_json_text(text: str) -> str:
-    """Fix common manual-AI JSON copy issues: smart quotes and markdown fences."""
-    text = text.strip()
+    """Fix common manual-AI JSON copy issues: smart quotes, fences, Unicode form.
+
+    NFC normalization collapses decomposed sequences (e.g. "й" pasted as
+    "и" + combining breve) so character names group under one key in reports.
+    """
+    text = unicodedata.normalize("NFC", text.strip())
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\s*```$", "", text)
