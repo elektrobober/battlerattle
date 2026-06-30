@@ -215,7 +215,7 @@ def apply_quality_profile(cfg: dict[str, Any]) -> dict[str, Any]:
         },
     }
     if profile not in profiles:
-        print(f"Предупреждение: неизвестный quality_profile={profile!r}; использую balanced")
+        logger.warning(f"Предупреждение: неизвестный quality_profile={profile!r}; использую balanced")
         profile = "balanced"
     # User config overrides profile defaults.
     return deep_merge(profiles[profile], cfg)
@@ -312,12 +312,12 @@ def preprocess_track_audio(session_dir: Path, track: dict[str, Any], config: dic
     output_path = paths.preprocess_dir / out_name
 
     if output_path.exists() and output_path.stat().st_size > 0:
-        print(f"Preprocess кэш: {track.get('speaker') or track['file']} ← {output_path.name}")
+        logger.info(f"Preprocess кэш: {track.get('speaker') or track['file']} ← {output_path.name}")
         return output_path
 
     filters = build_ffmpeg_filter(pre_cfg)
-    print(f"Preprocess: {input_path.name}")
-    print(f"  ffmpeg filter: {filters}")
+    logger.info(f"Preprocess: {input_path.name}")
+    logger.info(f"  ffmpeg filter: {filters}")
 
     cmd = [
         "ffmpeg",
@@ -371,10 +371,10 @@ def maybe_limit_audio(input_path: Path, track: dict[str, Any], config: dict[str,
     out_name = f"{safe_name(input_path.stem)}.{cfg_hash}.limit_{int(limit_seconds)}s.wav"
     output_path = paths.work_dir / out_name
     if output_path.exists() and output_path.stat().st_size > 0:
-        print(f"Limit кэш: {track.get('speaker') or track['file']} ← {output_path.name}")
+        logger.info(f"Limit кэш: {track.get('speaker') or track['file']} ← {output_path.name}")
         return output_path
 
-    print(f"Limit: беру первые {limit_minutes} мин из {input_path.name}")
+    logger.info(f"Limit: беру первые {limit_minutes} мин из {input_path.name}")
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(input_path),
@@ -435,7 +435,7 @@ def run_mlx_transcribe(audio_path: Path, config: dict[str, Any]) -> list[dict[st
 
     model = config.get("mlx_model") or config.get("model_size") or "mlx-community/whisper-large-v3-turbo"
     language = config.get("language", "ru")
-    print(f"  backend: mlx-whisper, model: {model}")
+    logger.info(f"  backend: mlx-whisper, model: {model}")
 
     # mlx-whisper не использует faster-whisper VAD. Очистку делаем через preprocess/noise gate.
     result = mlx_whisper.transcribe(
@@ -641,7 +641,7 @@ def transcribe_track(model: Any, session_dir: Path, track: dict[str, Any], confi
     audio_path = session_dir / file_name
 
     if not audio_path.exists():
-        print(f"ПРОПУСК: файл не найден — {audio_path}")
+        logger.warning(f"ПРОПУСК: файл не найден — {audio_path}")
         return []
 
     backend = get_backend(config)
@@ -659,14 +659,14 @@ def transcribe_track(model: Any, session_dir: Path, track: dict[str, Any], confi
     ))
     cache_path = paths.cache_dir / f"{safe_name(file_name)}.{fingerprint}.{transcription_cfg_hash}.jsonl"
     if cache_path.exists():
-        print(f"Кэш: {speaker} ← {cache_path.name}")
+        logger.info(f"Кэш: {speaker} ← {cache_path.name}")
         return read_jsonl(cache_path)
 
-    print(f"\n=== Транскрибирую: {speaker} ({file_name}) ===")
+    logger.info(f"\n=== Транскрибирую: {speaker} ({file_name}) ===")
     if base_transcription_path != audio_path:
-        print(f"  preprocessed: {base_transcription_path.name}")
+        logger.info(f"  preprocessed: {base_transcription_path.name}")
     if transcription_path != base_transcription_path:
-        print(f"  test/limit source: {transcription_path.name}")
+        logger.info(f"  test/limit source: {transcription_path.name}")
 
     if backend in ("mlx", "mlx_whisper", "mlx-whisper"):
         raw_segments = run_mlx_transcribe(transcription_path, config)
@@ -711,10 +711,10 @@ def transcribe_track(model: Any, session_dir: Path, track: dict[str, Any], confi
             "deduped_from": [],
         }
         rows.append(row)
-        print(f"  [{fmt_hms(start)}] {text}", flush=True)
+        logger.debug(f"  [{fmt_hms(start)}] {text}")
 
     write_jsonl(cache_path, rows)
-    print(f"  → {len(rows)} реплик. Кэш сохранён: {cache_path.name}")
+    logger.info(f"  → {len(rows)} реплик. Кэш сохранён: {cache_path.name}")
     return rows
 
 
@@ -725,7 +725,7 @@ def transcribe_all(session_dir: Path, config: dict[str, Any], paths: Paths) -> l
     if backend in ("faster_whisper", "faster-whisper", "faster"):
         if WhisperModel is None:
             raise RuntimeError("Не установлен faster-whisper. Выполни: pip install -r requirements.txt")
-        print(f"Загружаю faster-whisper модель {config.get('model_size', 'medium')} ({config.get('device', 'cpu')}, {config.get('compute_type', 'int8')})")
+        logger.info(f"Загружаю faster-whisper модель {config.get('model_size', 'medium')} ({config.get('device', 'cpu')}, {config.get('compute_type', 'int8')})")
         model = WhisperModel(
             config.get("model_size", "medium"),
             device=config.get("device", "cpu"),
@@ -734,9 +734,9 @@ def transcribe_all(session_dir: Path, config: dict[str, Any], paths: Paths) -> l
     elif backend in ("mlx", "mlx_whisper", "mlx-whisper"):
         if mlx_whisper is None:
             raise RuntimeError("Не установлен mlx-whisper. Выполни: pip install mlx-whisper")
-        print(f"Использую MLX backend для Apple Silicon: {config.get('mlx_model') or config.get('model_size')}")
+        logger.info(f"Использую MLX backend для Apple Silicon: {config.get('mlx_model') or config.get('model_size')}")
         if config.get("use_vad", True):
-            print("  note: VAD faster-whisper в MLX не применяется; чистку делает preprocess/noise gate.")
+            logger.info("  note: VAD faster-whisper в MLX не применяется; чистку делает preprocess/noise gate.")
     else:
         raise RuntimeError(f"Неизвестный transcription_backend: {backend}")
 
@@ -751,8 +751,8 @@ def transcribe_all(session_dir: Path, config: dict[str, Any], paths: Paths) -> l
     suffix = "_test" if (config.get("limit_minutes") or config.get("__limit_minutes")) else ""
     raw_path = paths.raw_dir / f"{config['session_name']}{suffix}_raw.jsonl"
     write_jsonl(raw_path, rows)
-    print(f"\nRaw сохранён: {raw_path}")
-    print(f"Raw реплик: {len(rows)}")
+    logger.info(f"\nRaw сохранён: {raw_path}")
+    logger.info(f"Raw реплик: {len(rows)}")
     return rows
 
 
@@ -854,7 +854,7 @@ def filter_hallucinations(rows: list[dict[str, Any]], cfg: dict[str, Any], paths
         suffix = "_test" if (cfg.get("limit_minutes") or cfg.get("__limit_minutes")) else ""
         rej_path = paths.raw_dir / f"{cfg['session_name']}{suffix}_rejected_hallucinations.jsonl"
         write_jsonl(rej_path, rejected)
-        print(f"Hallucination filter: удалено {len(rejected)} из {len(rows)} сегментов → {rej_path}")
+        logger.info(f"Hallucination filter: удалено {len(rejected)} из {len(rows)} сегментов → {rej_path}")
 
     return kept
 
@@ -941,7 +941,7 @@ def repair_segment_timings(rows: list[dict[str, Any]], cfg: dict[str, Any]) -> l
             changed += 1
 
     if changed:
-        print(f"Timing repair: исправлено end-таймкодов: {changed}")
+        logger.info(f"Timing repair: исправлено end-таймкодов: {changed}")
     return out
 
 # ──────────────────────────────────────────────────────────────
@@ -1138,7 +1138,7 @@ def write_quality_report(raw: list[dict[str, Any]], clean: list[dict[str, Any]],
         md.append(f"  avg_logprob={r.get('avg_logprob')} no_speech_prob={r.get('no_speech_prob')} compression_ratio={r.get('compression_ratio')}")
     out = paths.reports_dir / f"quality_report{suffix}.md"
     write_md(out, md)
-    print(f"Quality report: {out}")
+    logger.info(f"Quality report: {out}")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1170,9 +1170,9 @@ def write_clean_outputs(rows: list[dict[str, Any]], cfg: dict[str, Any], paths: 
     write_jsonl(clean_jsonl, rows)
     write_txt(clean_txt, rows)
     write_srt(clean_srt, rows)
-    print(f"Clean JSONL: {clean_jsonl}")
-    print(f"Clean TXT:   {clean_txt}")
-    print(f"Clean SRT:   {clean_srt}")
+    logger.info(f"Clean JSONL: {clean_jsonl}")
+    logger.info(f"Clean TXT:   {clean_txt}")
+    logger.info(f"Clean SRT:   {clean_srt}")
 
 
 
@@ -1235,7 +1235,7 @@ def make_chunks(rows: list[dict[str, Any]], cfg: dict[str, Any], paths: Paths) -
         write_json(p, payload)
         out_paths.append(p)
 
-    print(f"Чанков создано: {len(out_paths)} → {paths.chunks_dir}")
+    logger.info(f"Чанков создано: {len(out_paths)} → {paths.chunks_dir}")
     return out_paths
 
 
@@ -1292,8 +1292,8 @@ def make_prompts(chunk_paths: list[Path], paths: Paths) -> None:
         prompt = prompt_for_chunk(chunk)
         out = paths.prompts_dir / f"{p.stem}_prompt.md"
         out.write_text(prompt, encoding="utf-8")
-    print(f"Промпты созданы: {paths.prompts_dir}")
-    print(f"AI-ответы вручную клади сюда: {paths.manual_ai_dir}")
+    logger.info(f"Промпты созданы: {paths.prompts_dir}")
+    logger.info(f"AI-ответы вручную клади сюда: {paths.manual_ai_dir}")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1308,7 +1308,7 @@ def read_manual_results(paths: Paths) -> list[dict[str, Any]]:
             raw = p.read_text(encoding="utf-8")
             rows.append(json.loads(normalize_json_text(raw)))
         except Exception as e:
-            print(f"Не смог прочитать {p}: {e}")
+            logger.info(f"Не смог прочитать {p}: {e}")
     return rows
 
 
@@ -1371,8 +1371,8 @@ def build_reports(paths: Paths, cfg: dict[str, Any]) -> None:
     session_report = [f"# Session report — {cfg['session_name']}", "", "## Summaries"] + summaries + ["", "## Files", "- actions_timeline.md", "- dice_stats.md", "- mvp_candidates.md"]
     write_md(paths.reports_dir / "session_report.md", session_report)
 
-    print(f"Отчёты собраны: {paths.reports_dir}")
-    print(f"Прочитано AI-ответов: {len(results)}")
+    logger.info(f"Отчёты собраны: {paths.reports_dir}")
+    logger.info(f"Прочитано AI-ответов: {len(results)}")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1417,7 +1417,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     write_quality_report(raw, clean, cfg, paths)
     chunk_paths = make_chunks(clean, cfg, paths)
     make_prompts(chunk_paths, paths)
-    print("\nГотово. Дальше: открывай prompts/*.md, вручную прогоняй через AI и складывай JSON-ответы в manual_ai_results/.")
+    logger.info("\nГотово. Дальше: открывай prompts/*.md, вручную прогоняй через AI и складывай JSON-ответы в manual_ai_results/.")
 
 
 
@@ -1442,7 +1442,7 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
             raise RuntimeError(f"Не найден raw JSONL для rebuild: {raw_path}")
 
     raw = read_jsonl(raw_path)
-    print(f"Rebuild из raw: {raw_path} ({len(raw)} сегментов)")
+    logger.info(f"Rebuild из raw: {raw_path} ({len(raw)} сегментов)")
     filtered = filter_hallucinations(raw, cfg, paths)
     filtered = repair_segment_timings(filtered, cfg)
     clean = deduplicate(filtered, cfg)
@@ -1453,7 +1453,7 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
     write_quality_report(raw, clean, cfg, paths)
     chunk_paths = make_chunks(clean, cfg, paths)
     make_prompts(chunk_paths, paths)
-    print("\nRebuild готов: транскрибация не запускалась.")
+    logger.info("\nRebuild готов: транскрибация не запускалась.")
 
 def cmd_prepare_ai(args: argparse.Namespace) -> None:
     session_dir, cfg, paths = load_cfg(args)

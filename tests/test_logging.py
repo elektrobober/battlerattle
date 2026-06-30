@@ -52,3 +52,40 @@ def test_main_default_is_info_level():
     rc = dp.main(["run", "/nonexistent/session/dir"])
     assert rc == 1
     assert dp.logger.level == logging.INFO
+
+
+import json
+from pathlib import Path
+
+
+def test_unknown_profile_logs_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger="dnd_pipeline"):
+        dp.apply_quality_profile({"quality_profile": "definitely_not_a_profile"})
+    assert any("неизвестный" in r.message and r.levelno == logging.WARNING
+               for r in caplog.records)
+
+
+def test_missing_track_file_logs_warning(tmp_path, caplog):
+    track = {"file": "nope.wav", "speaker": "X", "index": 0}
+    cfg = {"session_name": "s"}
+    paths = dp.build_paths(tmp_path, "s")
+    dp.ensure_dirs(paths)
+    with caplog.at_level(logging.WARNING, logger="dnd_pipeline"):
+        rows = dp.transcribe_track(None, tmp_path, track, cfg, paths)
+    assert rows == []
+    assert any("ПРОПУСК" in r.message and r.levelno == logging.WARNING
+               for r in caplog.records)
+
+
+def test_make_chunks_logs_info(tmp_path, caplog):
+    paths = dp.build_paths(tmp_path, "s")
+    dp.ensure_dirs(paths)
+    rows = [{
+        "start": 0.0, "end": 2.0, "start_hms": dp.fmt_hms_ms(0.0),
+        "speaker": "A", "character": "A", "text": "привет мир",
+    }]
+    cfg = {"session_name": "s", "chunk_minutes": 10}
+    with caplog.at_level(logging.INFO, logger="dnd_pipeline"):
+        dp.make_chunks(rows, cfg, paths)
+    assert any("Чанков создано" in r.message and r.levelno == logging.INFO
+               for r in caplog.records)
