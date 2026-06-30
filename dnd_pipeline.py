@@ -785,7 +785,7 @@ def transcribe_all(session_dir: Path, config: dict[str, Any], paths: Paths) -> l
         raise RuntimeError(f"Неизвестный transcription_backend: {backend}")
 
     rows: list[dict[str, Any]] = []
-    tracks = config.get("tracks", [])
+    tracks = discover_tracks(session_dir, config)
     for i, track in enumerate(tracks):
         track = dict(track)
         track["index"] = i

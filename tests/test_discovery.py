@@ -106,3 +106,26 @@ def test_file_without_prefix_kept_intact(tmp_path):
     out = dp.discover_tracks(tmp_path, {"session_name": "dnd_2"})
     assert out[0]["speaker"] == "Безпрефикса"
     assert out[0]["character"] == "Безпрефикса"
+
+
+def test_transcribe_all_uses_discovery_when_no_tracks(tmp_path, monkeypatch):
+    # No `tracks` in config → transcribe_all should discover the two files and
+    # call transcribe_track once per discovered track.
+    (tmp_path / "dnd_2-Шиян.wav").write_bytes(b"")
+    (tmp_path / "dnd_2-Дима. Ангрон.wav").write_bytes(b"")
+
+    seen = []
+
+    def fake_transcribe_track(model, session_dir, track, config, paths):
+        seen.append(track["speaker"])
+        return []
+
+    monkeypatch.setattr(dp, "transcribe_track", fake_transcribe_track)
+    cfg = {"session_name": "dnd_2", "transcription_backend": "mlx"}
+    # Avoid loading a real MLX model: stub the model-load path.
+    monkeypatch.setattr(dp, "mlx_whisper", object())
+    paths = dp.build_paths(tmp_path, "dnd_2")
+    dp.ensure_dirs(paths)
+
+    dp.transcribe_all(tmp_path, cfg, paths)
+    assert sorted(seen) == ["Дима", "Шиян"]

@@ -52,6 +52,10 @@
 
   "master_mix": "dnd_2-001.wav",
 
+  "dm_speaker": "Данжен Мастер",
+  "audio_extensions": [".wav"],
+  "exclude": [],
+
   "tracks": [
     {"file": "dnd_2-Данжен Мастер.wav", "speaker": "Данжен Мастер", "character": "ДМ", "priority": 100},
     {"file": "dnd_2-Дима. Ангрон.wav", "speaker": "Дима", "character": "Ангрон", "priority": 50},
