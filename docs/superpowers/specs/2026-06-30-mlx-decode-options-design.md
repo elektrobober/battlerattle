@@ -36,6 +36,10 @@ be invested at the input.
 - Changing the post-hoc `hallucination_filter` (complementary, untouched).
 - Switching ASR engines (Breeze/GigaAM/cloud) — out of scope.
 - `language="auto"` default — the content is near-pure Russian; stays `ru`.
+- Layered config (campaign base + tiny per-session file) — deferred to a separate
+  follow-up sub-project. It is the main reuse improvement but kept out of this
+  spec to keep scope tight. The manual `initial_prompt` added here is
+  campaign-stable, so it lands cleanly in that future base config.
 
 ## Design
 
