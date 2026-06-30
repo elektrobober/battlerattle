@@ -338,6 +338,34 @@ def get_backend(config: dict[str, Any]) -> str:
     return str(config.get("transcription_backend") or config.get("backend") or "faster_whisper").strip().lower()
 
 
+_MLX_BACKENDS = {"mlx", "mlx_whisper", "mlx-whisper"}
+
+
+def resolve_decode_options(cfg: dict[str, Any], backend: str) -> dict[str, Any]:
+    """Build backend-correct decode kwargs from cfg['decode'].
+
+    Drops None values so the library default applies. Maps the logprob
+    threshold to the backend's parameter name (faster-whisper uses
+    `log_prob_threshold`, mlx uses `logprob_threshold`). Falls back to a
+    legacy top-level `condition_on_previous_text` when the decode block omits it.
+    """
+    decode = dict(cfg.get("decode", {}) or {})
+    is_mlx = str(backend).strip().lower() in _MLX_BACKENDS
+
+    condition = decode.get("condition_on_previous_text", cfg.get("condition_on_previous_text"))
+    logprob = decode.get("logprob_threshold")
+
+    opts: dict[str, Any] = {
+        "condition_on_previous_text": condition,
+        "initial_prompt": decode.get("initial_prompt"),
+        "compression_ratio_threshold": decode.get("compression_ratio_threshold"),
+        "no_speech_threshold": decode.get("no_speech_threshold"),
+        "hallucination_silence_threshold": decode.get("hallucination_silence_threshold"),
+        ("logprob_threshold" if is_mlx else "log_prob_threshold"): logprob,
+    }
+    return {k: v for k, v in opts.items() if v is not None}
+
+
 def normalize_segment_from_mlx(seg: dict[str, Any]) -> dict[str, Any]:
     return {
         "start": float(seg.get("start", 0.0) or 0.0),
