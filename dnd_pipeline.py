@@ -30,6 +30,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
+import numpy as np
+
 try:
     from faster_whisper import WhisperModel
 except Exception:  # pragma: no cover
@@ -62,6 +64,11 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def write_md(path: Path, lines: Iterable[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -451,6 +458,32 @@ def ensure_dirs(paths: Paths) -> None:
 # ──────────────────────────────────────────────────────────────
 
 
+def _decode_pcm_le(raw: bytes, sample_width: int) -> tuple[Any, float]:
+    """Decode little-endian PCM bytes to a float64 sample array + max_abs.
+
+    Vectorized via numpy. Trailing bytes that don't fill a full sample are dropped.
+    """
+    if sample_width == 1:
+        # 8-bit PCM is unsigned with a 128 offset.
+        usable = raw
+        samples = np.frombuffer(usable, dtype=np.uint8).astype(np.float64) - 128.0
+        return samples, 128.0
+    if sample_width == 2:
+        usable = raw[: len(raw) - (len(raw) % 2)]
+        samples = np.frombuffer(usable, dtype="<i2").astype(np.float64)
+        return samples, float(1 << 15)
+    if sample_width == 4:
+        usable = raw[: len(raw) - (len(raw) % 4)]
+        samples = np.frombuffer(usable, dtype="<i4").astype(np.float64)
+        return samples, float(1 << 31)
+    # 24-bit: numpy has no native int24, so build it from bytes.
+    usable = raw[: len(raw) - (len(raw) % 3)]
+    b = np.frombuffer(usable, dtype=np.uint8).reshape(-1, 3).astype(np.int32)
+    vals = b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)
+    vals = np.where(vals >= (1 << 23), vals - (1 << 24), vals)
+    return vals.astype(np.float64), float(1 << 23)
+
+
 def segment_rms_db(path: Path, start: float, end: float) -> float | None:
     """Return approximate RMS dBFS for a WAV segment using stdlib wave.
 
@@ -458,7 +491,6 @@ def segment_rms_db(path: Path, start: float, end: float) -> float | None:
     """
     try:
         with wave.open(str(path), "rb") as wf:
-            channels = wf.getnchannels()
             sample_width = wf.getsampwidth()
             frame_rate = wf.getframerate()
             nframes = wf.getnframes()
@@ -474,37 +506,20 @@ def segment_rms_db(path: Path, start: float, end: float) -> float | None:
 
             wf.setpos(start_frame)
             raw = wf.readframes(frame_count)
-
-        if not raw:
-            return None
-
-        # Decode little-endian PCM manually enough for RMS.
-        values: list[int] = []
-        step = sample_width
-        for i in range(0, len(raw), step):
-            chunk = raw[i:i + step]
-            if len(chunk) < step:
-                continue
-            if sample_width == 1:
-                val = chunk[0] - 128
-                max_abs = 128
-            else:
-                val = int.from_bytes(chunk, byteorder="little", signed=True)
-                max_abs = float(2 ** (8 * sample_width - 1))
-            values.append(val)
-
-        if not values:
-            return None
-
-        # Avoid massive memory on long segments by using all decoded samples here;
-        # Whisper segments are usually short enough.
-        mean_square = sum(float(v) * float(v) for v in values) / len(values)
-        rms = math.sqrt(mean_square)
-        if rms <= 0:
-            return -120.0
-        return 20.0 * math.log10(rms / max_abs)
-    except Exception:
+    except (wave.Error, OSError, EOFError, ValueError):
         return None
+
+    if not raw:
+        return None
+
+    samples, max_abs = _decode_pcm_le(raw, sample_width)
+    if samples.size == 0:
+        return None
+
+    rms = float(np.sqrt(np.mean(samples * samples)))
+    if rms <= 0:
+        return -120.0
+    return 20.0 * math.log10(rms / max_abs)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -885,6 +900,22 @@ def choose_better(a: dict[str, Any], b: dict[str, Any], cfg: dict[str, Any]) -> 
     return a
 
 
+def _dedup_payload(r: dict[str, Any]) -> dict[str, Any]:
+    """Compact record of a segment kept in another winner's `deduped_from`."""
+    return {
+        "source_file": r["source_file"],
+        "speaker": r["speaker"],
+        "character": r.get("character"),
+        "start": r["start"],
+        "end": r["end"],
+        "start_hms": r["start_hms"],
+        "end_hms": r["end_hms"],
+        "text": r["text"],
+        "rms_db": r.get("rms_db"),
+        "rms_db_original": r.get("rms_db_original"),
+    }
+
+
 def deduplicate(rows: list[dict[str, Any]], cfg: dict[str, Any]) -> list[dict[str, Any]]:
     if not cfg.get("dedupe", {}).get("enabled", True):
         return [{**r, "duplicate_status": "original", "deduped_from": []} for r in rows]
@@ -910,38 +941,13 @@ def deduplicate(rows: list[dict[str, Any]], cfg: dict[str, Any]) -> list[dict[st
         existing = clean[duplicate_index]
         better = choose_better(existing, row, cfg)
 
-        duplicate_payload = {
-            "source_file": row["source_file"],
-            "speaker": row["speaker"],
-            "character": row.get("character"),
-            "start": row["start"],
-            "end": row["end"],
-            "start_hms": row["start_hms"],
-            "end_hms": row["end_hms"],
-            "text": row["text"],
-            "rms_db": row.get("rms_db"),
-            "rms_db_original": row.get("rms_db_original"),
-        }
-
         if better is row:
-            replaced_payload = {
-                "source_file": existing["source_file"],
-                "speaker": existing["speaker"],
-                "character": existing.get("character"),
-                "start": existing["start"],
-                "end": existing["end"],
-                "start_hms": existing["start_hms"],
-                "end_hms": existing["end_hms"],
-                "text": existing["text"],
-                "rms_db": existing.get("rms_db"),
-                "rms_db_original": existing.get("rms_db_original"),
-            }
             new_item = dict(row)
             new_item["duplicate_status"] = "original"
-            new_item["deduped_from"] = existing.get("deduped_from", []) + [replaced_payload]
+            new_item["deduped_from"] = existing.get("deduped_from", []) + [_dedup_payload(existing)]
             clean[duplicate_index] = new_item
         else:
-            existing.setdefault("deduped_from", []).append(duplicate_payload)
+            existing.setdefault("deduped_from", []).append(_dedup_payload(row))
 
     clean.sort(key=lambda r: (r["start"], r["end"], r.get("speaker", "")))
     return clean
@@ -1032,7 +1038,7 @@ def write_quality_report(raw: list[dict[str, Any]], clean: list[dict[str, Any]],
         md.append(f"- `{r.get('start_hms')}` **{r.get('character') or r.get('speaker')}**: {r.get('text')}  ")
         md.append(f"  avg_logprob={r.get('avg_logprob')} no_speech_prob={r.get('no_speech_prob')} compression_ratio={r.get('compression_ratio')}")
     out = paths.reports_dir / f"quality_report{suffix}.md"
-    out.write_text("\n".join(md), encoding="utf-8")
+    write_md(out, md)
     print(f"Quality report: {out}")
 
 
@@ -1227,7 +1233,7 @@ def build_reports(paths: Paths, cfg: dict[str, Any]) -> None:
     actions_md = [f"# Actions timeline — {cfg['session_name']}", ""]
     for a in sorted(actions, key=lambda x: x.get("time", "")):
         actions_md.append(f"- `{a.get('time', '')}` **{a.get('character', '?')}** — {a.get('action', '')} → {a.get('outcome', '')} _{a.get('importance', '')}_")
-    (paths.reports_dir / "actions_timeline.md").write_text("\n".join(actions_md), encoding="utf-8")
+    write_md(paths.reports_dir / "actions_timeline.md", actions_md)
 
     # Dice stats
     by_char: dict[str, list[int]] = {}
@@ -1243,7 +1249,7 @@ def build_reports(paths: Paths, cfg: dict[str, Any]) -> None:
     for char, values in sorted(by_char.items()):
         avg = sum(values) / len(values)
         dice_lines.append(f"- **{char}**: {avg:.2f} по {len(values)} броскам")
-    (paths.reports_dir / "dice_stats.md").write_text("\n".join(dice_lines), encoding="utf-8")
+    write_md(paths.reports_dir / "dice_stats.md", dice_lines)
 
     # MVP candidates
     score: dict[str, int] = {}
@@ -1261,10 +1267,10 @@ def build_reports(paths: Paths, cfg: dict[str, Any]) -> None:
     mvp_lines.append("\n## Итоговый счёт по MVP-сигналам")
     for char, value in sorted(score.items(), key=lambda x: x[1], reverse=True):
         mvp_lines.append(f"- **{char}**: {value}")
-    (paths.reports_dir / "mvp_candidates.md").write_text("\n".join(mvp_lines), encoding="utf-8")
+    write_md(paths.reports_dir / "mvp_candidates.md", mvp_lines)
 
     session_report = [f"# Session report — {cfg['session_name']}", "", "## Summaries"] + summaries + ["", "## Files", "- actions_timeline.md", "- dice_stats.md", "- mvp_candidates.md"]
-    (paths.reports_dir / "session_report.md").write_text("\n".join(session_report), encoding="utf-8")
+    write_md(paths.reports_dir / "session_report.md", session_report)
 
     print(f"Отчёты собраны: {paths.reports_dir}")
     print(f"Прочитано AI-ответов: {len(results)}")
