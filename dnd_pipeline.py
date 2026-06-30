@@ -1307,8 +1307,8 @@ def read_manual_results(paths: Paths) -> list[dict[str, Any]]:
         try:
             raw = p.read_text(encoding="utf-8")
             rows.append(json.loads(normalize_json_text(raw)))
-        except Exception as e:
-            print(f"Не смог прочитать {p}: {e}")
+        except (OSError, ValueError) as e:
+            logger.warning(f"Не смог прочитать {p}: {e}")
     return rows
 
 
@@ -1358,7 +1358,7 @@ def build_reports(paths: Paths, cfg: dict[str, Any]) -> None:
         weight = item.get("weight", 1)
         try:
             weight_int = int(weight)
-        except Exception:
+        except (ValueError, TypeError):
             weight_int = 1
         score[char] = score.get(char, 0) + weight_int
         mvp_lines.append(f"- `{item.get('time', '')}` **{char}** +{weight_int} [{item.get('category', '')}] — {item.get('reason', '')}")
@@ -1514,10 +1514,10 @@ def main(argv: list[str] | None = None) -> int:
         args.func(args)
         return 0
     except KeyboardInterrupt:
-        print("\nОстановлено пользователем.")
+        logger.info("\nОстановлено пользователем.")
         return 130
-    except Exception as e:
-        print(f"Ошибка: {e}", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 — top-level CLI handler: catch all to exit cleanly
+        logger.error(f"Ошибка: {e}")
         return 1
 
 

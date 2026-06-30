@@ -89,3 +89,24 @@ def test_make_chunks_logs_info(tmp_path, caplog):
         dp.make_chunks(rows, cfg, paths)
     assert any("Чанков создано" in r.message and r.levelno == logging.INFO
                for r in caplog.records)
+
+
+def test_read_manual_results_skips_bad_json_and_logs(tmp_path, caplog):
+    paths = dp.build_paths(tmp_path, "s")
+    dp.ensure_dirs(paths)
+    (paths.manual_ai_dir / "good.json").write_text(
+        json.dumps({"summary": "ok", "chunk_index": 0}), encoding="utf-8")
+    (paths.manual_ai_dir / "bad.json").write_text("{ not valid json", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="dnd_pipeline"):
+        rows = dp.read_manual_results(paths)
+    assert len(rows) == 1
+    assert rows[0]["summary"] == "ok"
+    assert any("Не смог прочитать" in r.message and r.levelno == logging.WARNING
+               for r in caplog.records)
+
+
+def test_main_logs_error_and_returns_1_on_failure(caplog):
+    with caplog.at_level(logging.ERROR, logger="dnd_pipeline"):
+        rc = dp.main(["run", "/nonexistent/session/dir"])
+    assert rc == 1
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
