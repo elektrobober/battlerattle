@@ -580,6 +580,31 @@ def segment_rms_db(path: Path, start: float, end: float) -> float | None:
 # ──────────────────────────────────────────────────────────────
 
 
+def transcription_cache_signature(
+    config: dict[str, Any],
+    backend: str,
+    transcription_path_name: str,
+    transcription_fingerprint: str,
+    track_preprocess: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the dict whose stable_hash forms the per-track cache key."""
+    return {
+        "backend": backend,
+        "model_size": config.get("model_size", "medium"),
+        "mlx_model": config.get("mlx_model"),
+        "language": config.get("language", "ru"),
+        "use_vad": config.get("use_vad", True),
+        "vad_min_silence_ms": config.get("vad_min_silence_ms", 800),
+        "beam_size": config.get("beam_size", 5),
+        "condition_on_previous_text": config.get("condition_on_previous_text", False),
+        "decode_options": resolve_decode_options(config, backend),
+        "preprocess": {**(config.get("preprocess", {}) or {}), **(track_preprocess or {})},
+        "limit_minutes": config.get("limit_minutes") or config.get("__limit_minutes"),
+        "transcription_file": transcription_path_name,
+        "transcription_fingerprint": transcription_fingerprint,
+    }
+
+
 def transcribe_track(model: Any, session_dir: Path, track: dict[str, Any], config: dict[str, Any], paths: Paths) -> list[dict[str, Any]]:
     file_name = track["file"]
     speaker = track.get("speaker") or track.get("character") or file_name
@@ -597,20 +622,13 @@ def transcribe_track(model: Any, session_dir: Path, track: dict[str, Any], confi
 
     fingerprint = file_fingerprint(audio_path)
     transcription_fingerprint = file_fingerprint(transcription_path)
-    transcription_cfg_hash = stable_hash({
-        "backend": backend,
-        "model_size": config.get("model_size", "medium"),
-        "mlx_model": config.get("mlx_model"),
-        "language": config.get("language", "ru"),
-        "use_vad": config.get("use_vad", True),
-        "vad_min_silence_ms": config.get("vad_min_silence_ms", 800),
-        "beam_size": config.get("beam_size", 5),
-        "condition_on_previous_text": config.get("condition_on_previous_text", False),
-        "preprocess": {**(config.get("preprocess", {}) or {}), **(track.get("preprocess", {}) or {})},
-        "limit_minutes": config.get("limit_minutes") or config.get("__limit_minutes"),
-        "transcription_file": transcription_path.name,
-        "transcription_fingerprint": transcription_fingerprint,
-    })
+    transcription_cfg_hash = stable_hash(transcription_cache_signature(
+        config,
+        backend,
+        transcription_path.name,
+        transcription_fingerprint,
+        track.get("preprocess", {}) or {},
+    ))
     cache_path = paths.cache_dir / f"{safe_name(file_name)}.{fingerprint}.{transcription_cfg_hash}.jsonl"
     if cache_path.exists():
         print(f"Кэш: {speaker} ← {cache_path.name}")

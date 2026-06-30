@@ -144,3 +144,22 @@ def test_faster_transcribe_forwards_decode_options():
     assert model.captured["log_prob_threshold"] == -0.8
     assert "logprob_threshold" not in model.captured
     assert model.captured["word_timestamps"] is False
+
+
+def test_cache_signature_includes_decode_options():
+    cfg = dp.apply_quality_profile({"quality_profile": "balanced", "transcription_backend": "mlx"})
+    sig = dp.transcription_cache_signature(cfg, "mlx", "a.wav", "fp123")
+    assert "decode_options" in sig
+    assert sig["decode_options"]["no_speech_threshold"] == 0.6
+
+
+def test_cache_hash_changes_when_threshold_changes():
+    base = dp.apply_quality_profile({"quality_profile": "balanced", "transcription_backend": "mlx"})
+    tuned = dp.apply_quality_profile({
+        "quality_profile": "balanced",
+        "transcription_backend": "mlx",
+        "decode": {"no_speech_threshold": 0.9},
+    })
+    h1 = dp.stable_hash(dp.transcription_cache_signature(base, "mlx", "a.wav", "fp"))
+    h2 = dp.stable_hash(dp.transcription_cache_signature(tuned, "mlx", "a.wav", "fp"))
+    assert h1 != h2
