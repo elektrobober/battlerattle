@@ -718,6 +718,50 @@ def transcribe_track(model: Any, session_dir: Path, track: dict[str, Any], confi
     return rows
 
 
+def discover_tracks(session_dir: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the track list, auto-discovering from session files if needed.
+
+    If config has a non-empty `tracks`, it wins (returned unchanged). Otherwise
+    glob `session_dir` for audio files and derive each track's speaker/character
+    from the filename: strip the `{session_name}-` prefix, then split on the first
+    ". " into speaker/character (a single-part label sets speaker == character).
+    The `dm_speaker` track gets priority 100; everyone else 50. The `master_mix`
+    file and any `exclude` entries are skipped.
+    """
+    explicit = config.get("tracks")
+    if explicit:
+        return explicit
+
+    session_name = config.get("session_name", "")
+    extensions = {e.lower() for e in config.get("audio_extensions", [".wav"])}
+    excluded = set(config.get("exclude", []) or [])
+    if config.get("master_mix"):
+        excluded.add(config["master_mix"])
+    dm_speaker = config.get("dm_speaker")
+    prefix = f"{session_name}-"
+
+    tracks: list[dict[str, Any]] = []
+    for path in sorted(session_dir.iterdir(), key=lambda p: p.name):
+        if not path.is_file() or path.suffix.lower() not in extensions:
+            continue
+        if path.name in excluded:
+            continue
+        label = path.stem
+        if label.startswith(prefix):
+            label = label[len(prefix):]
+        if ". " in label:
+            speaker, character = label.split(". ", 1)
+        else:
+            speaker = character = label
+        tracks.append({
+            "file": path.name,
+            "speaker": speaker,
+            "character": character,
+            "priority": 100 if speaker == dm_speaker else 50,
+        })
+    return tracks
+
+
 def transcribe_all(session_dir: Path, config: dict[str, Any], paths: Paths) -> list[dict[str, Any]]:
     backend = get_backend(config)
     model = None
