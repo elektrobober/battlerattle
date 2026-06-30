@@ -24,6 +24,8 @@ build/
 
 # Session data (real recordings, transcripts, personal data)
 may/
+May/
+June/
 *.wav
 *.mp3
 *.m4a
