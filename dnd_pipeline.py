@@ -1308,7 +1308,7 @@ def read_manual_results(paths: Paths) -> list[dict[str, Any]]:
             raw = p.read_text(encoding="utf-8")
             rows.append(json.loads(normalize_json_text(raw)))
         except Exception as e:
-            logger.info(f"Не смог прочитать {p}: {e}")
+            print(f"Не смог прочитать {p}: {e}")
     return rows
 
 
