@@ -163,3 +163,14 @@ def test_cache_hash_changes_when_threshold_changes():
     h1 = dp.stable_hash(dp.transcription_cache_signature(base, "mlx", "a.wav", "fp"))
     h2 = dp.stable_hash(dp.transcription_cache_signature(tuned, "mlx", "a.wav", "fp"))
     assert h1 != h2
+
+
+def test_config_example_has_valid_decode_block():
+    import json
+    from pathlib import Path
+    cfg = json.loads(Path("config.example.json").read_text(encoding="utf-8"))
+    assert "decode" in cfg
+    assert "initial_prompt" in cfg["decode"]
+    merged = dp.apply_quality_profile(cfg)
+    opts = dp.resolve_decode_options(merged, "mlx")
+    assert "condition_on_previous_text" in opts

@@ -44,6 +44,13 @@ PodTrak WAV
 "compute_type": "int8"
 ```
 
+> **MLX (Apple Silicon):** `device` и `compute_type` применяются только к
+> бэкенду faster-whisper. MLX их игнорирует и всегда работает fp16 на
+> Metal GPU / Neural Engine. Качество декодирования на MLX контролируется
+> блоком `decode` (`initial_prompt`, `condition_on_previous_text`,
+> `compression_ratio_threshold`, `logprob_threshold`, `no_speech_threshold`,
+> `hallucination_silence_threshold`), который задаются профилями качества по умолчанию.
+
 ## Установка
 
 ```bash

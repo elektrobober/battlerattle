@@ -15,6 +15,15 @@
   "beam_size": 5,
   "condition_on_previous_text": false,
 
+  "decode": {
+    "initial_prompt": "Запись настольной игры Dungeons & Dragons на русском. Партия: Ангрон, Антернер, Шиян, Гай Гексан, Алкюр Септик. Ведёт Данжен Мастер. Термины: инициатива, спасбросок, проверка, крит, преимущество, помеха, заклинание. Реплики с правильной пунктуацией: «Я атакую гоблина. Бросаю d20 — выпало 17.»",
+    "condition_on_previous_text": false,
+    "compression_ratio_threshold": 2.4,
+    "logprob_threshold": -1.0,
+    "no_speech_threshold": 0.6,
+    "hallucination_silence_threshold": 2.0
+  },
+
   "preprocess": {
     "enabled": true,
     "sample_rate": 16000,
