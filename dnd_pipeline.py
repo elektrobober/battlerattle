@@ -1725,6 +1725,9 @@ def load_party(assets_dir: Path) -> list[dict[str, Any]]:
     except ValueError as e:
         logger.warning(f"Битый party.json: {e}")
         return []
+    if not isinstance(raw, list):
+        logger.warning(f"party.json: ожидаю список, получил {type(raw).__name__}")
+        return []
     return [m for m in raw if isinstance(m, dict) and m.get("name")]
 
 
@@ -1739,6 +1742,17 @@ def find_scene_images(assets_dir: Path) -> dict[int, Path]:
     return scenes
 
 
+def _with_defaults(record: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    """Копия record, где отсутствующие ключи заполнены дефолтами.
+
+    Ручной AI-JSON (вставленный пользователем вручную из чата) может не
+    содержать всех полей схемы — а .typ-шаблон обращается к полям напрямую
+    (data.foo), так что любой отсутствующий ключ роняет всю сборку PDF.
+    Нормализуем записи здесь, а не в шаблоне.
+    """
+    return {**defaults, **record}
+
+
 def build_pdf_data(
     cfg: dict[str, Any],
     pdf_cfg: dict[str, Any],
@@ -1747,11 +1761,12 @@ def build_pdf_data(
     party: list[dict[str, Any]],
     scene_images: dict[int, Path],
 ) -> dict[str, Any]:
+    scene_defaults = {"title": "", "chunk_index": 0, "time": "", "image_prompt": ""}
     scenes = []
     for i, scene in enumerate((synthesis or {}).get("scenes", []), start=1):
         img = scene_images.get(i)
         scenes.append({
-            **scene,
+            **_with_defaults(scene, scene_defaults),
             "file": f"images/scene{i}{img.suffix.lower()}" if img else None,
         })
     mvp_scores = [
@@ -1762,6 +1777,13 @@ def build_pdf_data(
         {"character": char, **st}
         for char, st in sorted(report_data["dice_stats"].items(), key=lambda x: x[1]["avg"], reverse=True)
     ]
+    action_defaults = {"time": "", "character": "", "action": "", "outcome": "", "importance": ""}
+    dice_defaults = {
+        "time": "", "character": "", "roll_type": "", "die": "",
+        "natural": None, "modifier": None, "total": None,
+        "context": "", "confidence": "",
+    }
+    mvp_event_defaults = {"time": "", "character": "", "category": "", "reason": ""}
     return {
         "session": cfg["session_name"],
         "campaign_title": pdf_cfg["campaign_title"],
@@ -1772,10 +1794,10 @@ def build_pdf_data(
         "party": [{**m, "ref_file": None} for m in party],
         "mvp_scores": mvp_scores,
         "mvp_categories": report_data["mvp_categories"],
-        "mvp_events": report_data["mvp_events"],
+        "mvp_events": [_with_defaults(e, mvp_event_defaults) for e in report_data["mvp_events"]],
         "dice_stats": dice_stats,
-        "dice": report_data["dice"],
-        "actions": report_data["actions"],
+        "dice": [_with_defaults(d, dice_defaults) for d in report_data["dice"]],
+        "actions": [_with_defaults(a, action_defaults) for a in report_data["actions"]],
         "summaries": report_data["summaries"],
     }
 
@@ -1903,7 +1925,10 @@ def build_pdf_pipeline(
     synthesis = run_session_synthesis(cfg, paths, party, force=force_synthesis)
     scene_images = find_scene_images(assets_dir)
     if synthesis and not scene_images:
-        logger.info("Сцены: сгенерируй по out/image_prompts.md, положи в report_assets/ и запусти build-pdf.")
+        logger.info(
+            f"Сцены: сгенерируй по {paths.out_dir / 'image_prompts.md'}, "
+            "положи в report_assets/ и запусти build-pdf."
+        )
 
     report_data = compute_report_data(results, cfg)
     data = build_pdf_data(cfg, pdf_cfg, report_data, synthesis, party, scene_images)
@@ -2011,7 +2036,10 @@ def cmd_run(args: argparse.Namespace) -> None:
     make_prompts(chunk_paths, paths)
     if run_ai_analysis(chunk_paths, cfg, paths):
         build_reports(paths, cfg)
-        build_pdf_pipeline(session_dir, cfg, paths)
+        try:
+            build_pdf_pipeline(session_dir, cfg, paths)
+        except Exception as e:  # noqa: BLE001 — сборка PDF не должна валить уже готовый run
+            logger.warning(f"PDF не собрался: {e}")
         logger.info("\nГотово: AI-анализ прошёл, отчёты в reports/.")
     else:
         logger.info("\nГотово. Дальше: открывай prompts/*.md, вручную прогоняй через AI и складывай JSON-ответы в manual_ai_results/.")

@@ -21,7 +21,7 @@
   #text(fill: gold, size: 26pt, weight: "bold")[#data.session]
   #v(1.2em)
   #if data.scenes.len() > 0 and data.scenes.at(0).file != none [
-    #image(data.scenes.at(0).file, width: 92%)
+    #image(data.scenes.at(0).file, width: 92%, height: 45%, fit: "contain")
   ]
   #v(1em)
   #if data.scenes.len() > 0 [
@@ -126,8 +126,10 @@
   #pagebreak()
   = Ключевые сцены
   #for scene in data.scenes.slice(1) [
-    #if scene.file != none [#image(scene.file, width: 100%)]
-    #align(center)[#text(fill: bordo, weight: "bold")[#scene.title] #text(size: 9pt, fill: muted)[#raw(scene.time)]]
+    #block(breakable: false)[
+      #if scene.file != none [#image(scene.file, width: 100%, height: 11cm, fit: "contain")]
+      #align(center)[#text(fill: bordo, weight: "bold")[#scene.title] #text(size: 9pt, fill: muted)[#raw(scene.time)]]
+    ]
     #v(0.8em)
   ]
 ]

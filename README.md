@@ -291,8 +291,8 @@ reports/session_report.md
 
 Воркфлоу:
 
-1. `run` (или `ai-analyze`) уже сам вызывает `build-pdf` в конце — если `manual_ai_results/` не пуст, PDF соберётся автоматически. Заодно на этом шаге считается «синтез сессии» (recap, quest hooks, промпты для картинок) и пишется `out/image_prompts.md`.
-2. Открой `out/image_prompts.md`, скорми промпты Midjourney (или любому image-генератору).
+1. `run` уже сам вызывает сборку PDF в конце (после AI-этапа, если он прошёл через API) — если `manual_ai_results/` не пуст, PDF соберётся автоматически. Заодно на этом шаге считается «синтез сессии» (recap, quest hooks, промпты для картинок) и пишется `_dnd_pipeline_out/<session_name>/image_prompts.md`. Обрати внимание: `ai-analyze` (ручной перезапуск AI-этапа) PDF не собирает — только `run` и `build-pdf`.
+2. Открой `_dnd_pipeline_out/<session_name>/image_prompts.md`, скорми промпты Midjourney (или любому image-генератору).
 3. Сохрани картинки в `report_assets/` рядом с сессией под именами `scene1.png`, `scene2.jpg`, … (номер = порядок сцены в `image_prompts.md`; расширение `.png`/`.jpg`/`.jpeg` любое).
 4. Пересобери PDF, чтобы вставить картинки:
 
@@ -328,14 +328,14 @@ python3 dnd_pipeline.py build-pdf /path/to/session \
 
 | Поле | По умолчанию | Что делает |
 | --- | --- | --- |
-| `pdf.enabled` | `true` | Собирать ли PDF после `run`/`ai-analyze`. `false` — пропустить (в т.ч. в `build-pdf` — команда сразу выйдет с предупреждением). |
+| `pdf.enabled` | `true` | Собирать ли PDF (после `run` и в `build-pdf`; `ai-analyze` PDF не собирает). `false` — пропустить (в т.ч. в `build-pdf` — команда сразу выйдет с предупреждением). |
 | `pdf.assets_dir` | `null` | Папка со сценами/`party.json`. По умолчанию — `report_assets/` рядом с сессией. |
 | `pdf.campaign_title` | `"Хроники кампании"` | Заголовок кампании в подвале страниц. |
 | `pdf.subtitle` | `"D&D · Forgotten Realms"` | Подзаголовок на обложке. |
 
 Отдельно: `build-pdf` поддерживает `--force-synthesis` (пересчитать recap/сцены заново, даже если есть кэш) и `--quality-profile` (как у остальных команд).
 
-Результат: `out/Session_<session_name>_Report.pdf`.
+Результат: `_dnd_pipeline_out/<session_name>/Session_<session_name>_Report.pdf`.
 
 > **Переносимость.** Рендер PDF идёт через пакет `typst` (`pip install typst`) — это чистый pip-wheel без системных зависимостей (никаких Chromium/WeasyPrint/LaTeX). Если пакет не установлен, `build-pdf` не падает, а пишет предупреждение с подсказкой `pip install typst` и завершает работу с кодом 0.
 

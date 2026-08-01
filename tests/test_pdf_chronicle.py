@@ -187,6 +187,21 @@ class TestPdfAssets:
         assert len(party) == 1
         assert party[0]["name"] == "Ангрон"
 
+    def test_load_party_scalar_returns_empty_no_raise(self, tmp_path, caplog):
+        dp.write_json(tmp_path / "party.json", "не список")
+        with caplog.at_level("WARNING"):
+            party = dp.load_party(tmp_path)
+        assert party == []
+        assert "party.json" in caplog.text
+
+    def test_load_party_dict_returns_empty_no_raise(self, tmp_path, caplog):
+        # частая ошибка: {"party": [...]} вместо голого списка
+        dp.write_json(tmp_path / "party.json", {"party": [{"name": "Ангрон"}]})
+        with caplog.at_level("WARNING"):
+            party = dp.load_party(tmp_path)
+        assert party == []
+        assert "party.json" in caplog.text
+
     def test_find_scene_images(self, tmp_path):
         (tmp_path / "scene1_tavern.png").write_bytes(b"x")
         (tmp_path / "scene3.jpg").write_bytes(b"x")
@@ -225,6 +240,54 @@ class TestBuildPdfData:
         assert data["recap"] == ""
         assert data["quest_hooks"] == []
         assert data["scenes"] == []
+
+    def test_tolerates_missing_keys_in_user_pasted_json(self, tmp_path):
+        # Ручной AI-JSON пасчен вручную и может не содержать всех полей схемы —
+        # шаблон .typ падает на прямом доступе к полю (data.foo), поэтому
+        # build_pdf_data должен сам подставлять дефолты.
+        results = [
+            {
+                "chunk_index": 0, "summary": "Эпизод",
+                "actions": [{"time": "00:01:00.000", "character": "Гай", "action": "напал"}],  # нет outcome/importance
+                "dice_rolls": [{"time": "00:02:00.000", "character": "Гай", "roll_type": "attack", "natural": 15}],  # нет die/modifier/total/context/confidence
+                "mvp_signals": [{"time": "00:03:00.000", "character": "Гай", "reason": "яркий момент", "weight": 1}],  # нет category
+            }
+        ]
+        report_data = dp.compute_report_data(results, {"session_name": "t"})
+        synthesis = {
+            "recap": "", "quest_hooks": [],
+            "scenes": [{"title": "Сцена"}],  # нет chunk_index/time/image_prompt
+        }
+        (tmp_path / "scene1.png").write_bytes(b"png")
+        scene_images = {1: tmp_path / "scene1.png"}
+
+        data = dp.build_pdf_data({"session_name": "t"}, dp.resolve_pdf_config({}),
+                                 report_data, synthesis, [], scene_images)
+
+        action = data["actions"][0]
+        assert action["outcome"] == ""
+        assert action["importance"] == ""
+        assert action["time"] == "00:01:00.000"
+        assert action["character"] == "Гай"
+        assert action["action"] == "напал"
+
+        roll = data["dice"][0]
+        assert roll["die"] == ""
+        assert roll["modifier"] is None
+        assert roll["total"] is None
+        assert roll["context"] == ""
+        assert roll["confidence"] == ""
+        assert roll["natural"] == 15
+
+        event = data["mvp_events"][0]
+        assert event["category"] == ""
+        assert event["reason"] == "яркий момент"
+
+        scene = data["scenes"][0]
+        assert scene["chunk_index"] == 0
+        assert scene["time"] == ""
+        assert scene["image_prompt"] == ""
+        assert scene["title"] == "Сцена"
 
 
 class TestStagePdfBuild:
@@ -266,6 +329,31 @@ def _staged_build(tmp_path):
     return dp.stage_pdf_build(paths, data, [], {}, assets, template_dir)
 
 
+def _staged_build_with_missing_keys(tmp_path):
+    """Как _staged_build, но данные — как из вручную вставленного AI-JSON:
+    без части необязательных с точки зрения человека, но обязательных для
+    шаблона полей. Проверяет, что build_pdf_data нормализует их до того, как
+    typst попытается скомпилировать шаблон."""
+    paths = dp.build_paths(tmp_path / "session", "t")
+    dp.ensure_dirs(paths)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    results = [
+        {
+            "chunk_index": 0, "summary": "Эпизод без полей",
+            "actions": [{"time": "00:01:00.000", "character": "Гай", "action": "напал"}],
+            "dice_rolls": [{"time": "00:02:00.000", "character": "Гай", "roll_type": "attack", "natural": 15}],
+            "mvp_signals": [{"time": "00:03:00.000", "character": "Гай", "reason": "яркий момент", "weight": 1}],
+        }
+    ]
+    report_data = dp.compute_report_data(results, {"session_name": "t"})
+    synthesis = {"recap": "", "quest_hooks": [], "scenes": [{"title": "Сцена без времени"}]}
+    data = dp.build_pdf_data({"session_name": "t"}, dp.resolve_pdf_config({}),
+                             report_data, synthesis, [], {})
+    template_dir = dp.Path(dp.__file__).parent / "pdf_template"
+    return dp.stage_pdf_build(paths, data, [], {}, assets, template_dir)
+
+
 class TestRenderPdf:
     def test_missing_typst_raises_helpful_error(self, tmp_path, monkeypatch):
         import builtins
@@ -288,6 +376,99 @@ class TestRenderPdf:
         dp.render_pdf(build_dir, out)
         assert out.exists()
         assert out.read_bytes()[:5] == b"%PDF-"
+
+    @pytest.mark.slow
+    def test_compiles_data_with_missing_optional_keys(self, tmp_path):
+        # Регрессия: раньше шаблон падал на отсутствующих ключах (например
+        # action.outcome) в вручную вставленном AI-JSON. build_pdf_data теперь
+        # сам подставляет дефолты — компиляция должна пройти без ошибок.
+        pytest.importorskip("typst")
+        build_dir = _staged_build_with_missing_keys(tmp_path)
+        out = tmp_path / "report.pdf"
+        dp.render_pdf(build_dir, out)
+        assert out.exists()
+        assert out.read_bytes()[:5] == b"%PDF-"
+
+
+def _make_portrait_png(path, width=400, height=1600):
+    from PIL import Image
+    Image.new("RGB", (width, height), (120, 30, 30)).save(path)
+
+
+def _staged_build_with_portrait_scenes(tmp_path, n_scenes=2):
+    """Обложка + «Ключевые сцены» с очень высокими (портретными) картинками —
+    без ограничения по высоте #image(..., width: 92%/100%) раздувает страницу
+    и портит вёрстку/пагинацию."""
+    paths = dp.build_paths(tmp_path / "session", "t")
+    dp.ensure_dirs(paths)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    scene_images = {}
+    for i in range(1, n_scenes + 1):
+        p = assets / f"scene{i}.png"
+        _make_portrait_png(p)
+        scene_images[i] = p
+    report_data = dp.compute_report_data(_results_fixture(), {"session_name": "t"})
+    synthesis = {
+        "recap": "", "quest_hooks": [],
+        "scenes": [
+            {"title": f"Сцена {i}", "chunk_index": 0, "time": "00:0{}:00.000".format(i),
+             "image_prompt": "tall portrait scene"}
+            for i in range(1, n_scenes + 1)
+        ],
+    }
+    data = dp.build_pdf_data({"session_name": "t"}, dp.resolve_pdf_config({}),
+                             report_data, synthesis, [], scene_images)
+    template_dir = dp.Path(dp.__file__).parent / "pdf_template"
+    return dp.stage_pdf_build(paths, data, [], scene_images, assets, template_dir)
+
+
+class TestPortraitImageLayout:
+    """Проверяет, что вертикально вытянутые (портретные) картинки не рвут
+    вёрстку: обложка ограничена по высоте, а в «Ключевых сценах» картинка и
+    подпись не разъезжаются на разные страницы."""
+
+    @pytest.mark.slow
+    def test_portrait_images_do_not_blow_up_page_count(self, tmp_path):
+        pytest.importorskip("typst")
+        pypdf = pytest.importorskip("pypdf")
+
+        build_dir = _staged_build_with_portrait_scenes(tmp_path)
+        out = tmp_path / "report.pdf"
+        dp.render_pdf(build_dir, out)
+        assert out.exists()
+
+        reader = pypdf.PdfReader(str(out))
+        n_pages = len(reader.pages)
+        # Разумная хроника из ~2 эпизодов без картинок обычно укладывается в
+        # районе десятка страниц (обложка, оглавление, сводка, зацепки,
+        # ключевые сцены, полная хроника, MVP, кости, тайм-лайн). Без
+        # ограничения высоты одна портретная картинка на обложке сама по
+        # себе способна растянуться на несколько лишних страниц (image
+        # overflow), так что верхняя граница здесь — это защита от
+        # регресса, а не точная цифра.
+        assert n_pages <= 12, f"неожиданно много страниц ({n_pages}) — похоже, портретная картинка раздула вёрстку"
+
+    @pytest.mark.slow
+    def test_cover_image_capped_height_in_typ_source(self):
+        # Явная проверка исходника шаблона: обложка не должна использовать
+        # чистый width-only image() — иначе портретная картинка ничем не
+        # ограничена по высоте.
+        typ_src = (dp.Path(dp.__file__).parent / "pdf_template" / "report.typ").read_text(encoding="utf-8")
+        # Берём блок обложки (до маркера внутренних страниц).
+        cover_src = typ_src.split("Внутренние страницы")[0]
+        assert "height:" in cover_src, "обложка должна ограничивать высоту картинки (height + fit: contain)"
+        assert 'fit: "contain"' in cover_src
+
+    @pytest.mark.slow
+    def test_key_scenes_image_and_caption_not_breakable(self):
+        typ_src = (dp.Path(dp.__file__).parent / "pdf_template" / "report.typ").read_text(encoding="utf-8")
+        scenes_src = typ_src.split("Ключевые сцены")[1]
+        assert "breakable: false" in scenes_src, (
+            "картинка сцены и подпись должны быть в одном #block(breakable: false), "
+            "иначе пара может разъехаться по разным страницам"
+        )
+        assert "height:" in scenes_src
 
 
 class TestBuildPdfCli:
@@ -328,3 +509,57 @@ class TestBuildPdfCli:
         monkeypatch.setattr(dp, "render_pdf", boom)
         rc = dp.main(["build-pdf", str(session)])
         assert rc == 0  # warning, не падение
+
+
+class TestCmdRunPdfGuard:
+    """PDF-сборка не должна убивать уже завершённый run: cmd_run оборачивает
+    build_pdf_pipeline в try/except, cmd_build_pdf — нет (ошибки там видны напрямую)."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        session = tmp_path / "session"
+        session.mkdir()
+        dp.write_json(session / "config.json", {"session_name": "test"})
+        # Заглушаем весь пайплайн до build_pdf_pipeline — этот тест только про
+        # то, что исключение из build_pdf_pipeline не прерывает cmd_run.
+        monkeypatch.setattr(dp, "transcribe_all", lambda session_dir, cfg, paths: [])
+        monkeypatch.setattr(dp, "filter_hallucinations", lambda rows, cfg, paths=None: rows)
+        monkeypatch.setattr(dp, "repair_segment_timings", lambda rows, cfg: rows)
+        monkeypatch.setattr(dp, "deduplicate", lambda rows, cfg: rows)
+        monkeypatch.setattr(dp, "merge_adjacent_segments", lambda rows, cfg: rows)
+        monkeypatch.setattr(dp, "write_clean_outputs", lambda rows, cfg, paths: None)
+        monkeypatch.setattr(dp, "write_quality_report", lambda raw, clean, cfg, paths: None)
+        monkeypatch.setattr(dp, "make_chunks", lambda rows, cfg, paths: [])
+        monkeypatch.setattr(dp, "make_prompts", lambda chunk_paths, paths: None)
+        monkeypatch.setattr(dp, "run_ai_analysis", lambda chunk_paths, cfg, paths, force=False: True)
+        monkeypatch.setattr(dp, "build_reports", lambda paths, cfg: None)
+        return session
+
+    def test_pdf_failure_does_not_abort_run(self, tmp_path, monkeypatch, caplog):
+        session = self._setup(tmp_path, monkeypatch)
+
+        def boom(session_dir, cfg, paths, force_synthesis=False):
+            raise RuntimeError("typst сломался")
+
+        monkeypatch.setattr(dp, "build_pdf_pipeline", boom)
+        with caplog.at_level("WARNING"):
+            rc = dp.main(["run", str(session)])
+        assert rc == 0
+        assert "typst сломался" in caplog.text
+
+    def test_build_pdf_cli_still_surfaces_errors(self, tmp_path, monkeypatch, caplog):
+        # cmd_build_pdf (прямой вызов build-pdf) НЕ оборачивается в свой try/except —
+        # ошибка идёт как обычно и ловится только общим CLI-хендлером в main()
+        # (rc=1), в отличие от cmd_run, где build_pdf_pipeline гасится локально
+        # и run завершается с rc=0.
+        session = tmp_path / "session2"
+        session.mkdir()
+        dp.write_json(session / "config.json", {"session_name": "test"})
+
+        def boom(session_dir, cfg, paths, force_synthesis=False):
+            raise RuntimeError("typst сломался")
+
+        monkeypatch.setattr(dp, "build_pdf_pipeline", boom)
+        with caplog.at_level("ERROR"):
+            rc = dp.main(["build-pdf", str(session)])
+        assert rc == 1
+        assert "typst сломался" in caplog.text
