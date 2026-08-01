@@ -1562,63 +1562,101 @@ def run_ai_analysis(
     return True
 
 
-def build_reports(paths: Paths, cfg: dict[str, Any]) -> None:
-    results = read_manual_results(paths)
-    paths.reports_dir.mkdir(parents=True, exist_ok=True)
-
+def compute_report_data(results: list[dict[str, Any]], cfg: dict[str, Any]) -> dict[str, Any]:
+    """Общие расчёты для markdown-отчётов и PDF-хроники."""
     actions: list[dict[str, Any]] = []
     dice: list[dict[str, Any]] = []
-    mvp: list[dict[str, Any]] = []
-    summaries: list[str] = []
+    mvp_events: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
 
     for res in results:
         actions.extend(res.get("actions", []) or [])
         dice.extend(res.get("dice_rolls", []) or [])
-        mvp.extend(res.get("mvp_signals", []) or [])
+        for item in res.get("mvp_signals", []) or []:
+            item = dict(item)
+            try:
+                item["weight"] = int(item.get("weight", 1))
+            except (ValueError, TypeError):
+                item["weight"] = 1
+            mvp_events.append(item)
         if res.get("summary"):
-            summaries.append(f"- chunk {res.get('chunk_index')}: {res.get('summary')}")
+            summaries.append({"chunk_index": res.get("chunk_index"), "summary": res["summary"]})
+
+    dice_stats: dict[str, dict[str, Any]] = {}
+    for d in dice:
+        natural = d.get("natural")
+        if not isinstance(natural, int):
+            continue
+        char = d.get("character") or "?"
+        st = dice_stats.setdefault(char, {"values": [], "nat20": 0, "nat1": 0})
+        st["values"].append(natural)
+        if natural == 20:
+            st["nat20"] += 1
+        if natural == 1:
+            st["nat1"] += 1
+    for char, st in dice_stats.items():
+        values = st.pop("values")
+        st["avg"] = sum(values) / len(values)
+        st["count"] = len(values)
+
+    mvp_scores: dict[str, int] = {}
+    mvp_categories: dict[str, dict[str, int]] = {}
+    for item in mvp_events:
+        char = item.get("character") or "?"
+        weight = item["weight"]
+        mvp_scores[char] = mvp_scores.get(char, 0) + weight
+        cat = item.get("category") or "?"
+        mvp_categories.setdefault(char, {})
+        mvp_categories[char][cat] = mvp_categories[char].get(cat, 0) + weight
+
+    return {
+        "actions": sorted(actions, key=lambda x: x.get("time", "")),
+        "dice": dice,
+        "dice_stats": dice_stats,
+        "mvp_events": mvp_events,
+        "mvp_scores": mvp_scores,
+        "mvp_categories": mvp_categories,
+        "summaries": summaries,
+    }
+
+
+def build_reports(paths: Paths, cfg: dict[str, Any]) -> None:
+    results = read_manual_results(paths)
+    paths.reports_dir.mkdir(parents=True, exist_ok=True)
+
+    data = compute_report_data(results, cfg)
 
     # Actions timeline
     actions_md = [f"# Actions timeline — {cfg['session_name']}", ""]
-    for a in sorted(actions, key=lambda x: x.get("time", "")):
+    for a in data["actions"]:
         actions_md.append(f"- `{a.get('time', '')}` **{a.get('character', '?')}** — {a.get('action', '')} → {a.get('outcome', '')} _{a.get('importance', '')}_")
     write_md(paths.reports_dir / "actions_timeline.md", actions_md)
 
     # Dice stats
-    by_char: dict[str, list[int]] = {}
     dice_lines = [f"# Dice stats — {cfg['session_name']}", ""]
-    for d in dice:
+    for d in data["dice"]:
         char = d.get("character") or "?"
-        natural = d.get("natural")
-        if isinstance(natural, int):
-            by_char.setdefault(char, []).append(natural)
         dice_lines.append(f"- `{d.get('time', '')}` **{char}** {d.get('roll_type', '')}: natural={d.get('natural')} modifier={d.get('modifier')} total={d.get('total')} — {d.get('context', '')} _{d.get('confidence', '')}_")
 
     dice_lines.append("\n## Средние чистые d20, только где natural распознан")
-    for char, values in sorted(by_char.items()):
-        avg = sum(values) / len(values)
-        dice_lines.append(f"- **{char}**: {avg:.2f} по {len(values)} броскам")
+    for char, st in sorted(data["dice_stats"].items()):
+        dice_lines.append(f"- **{char}**: {st['avg']:.2f} по {st['count']} броскам")
     write_md(paths.reports_dir / "dice_stats.md", dice_lines)
 
     # MVP candidates
-    score: dict[str, int] = {}
     mvp_lines = [f"# MVP candidates — {cfg['session_name']}", ""]
-    for item in mvp:
+    for item in data["mvp_events"]:
         char = item.get("character") or "?"
-        weight = item.get("weight", 1)
-        try:
-            weight_int = int(weight)
-        except (ValueError, TypeError):
-            weight_int = 1
-        score[char] = score.get(char, 0) + weight_int
+        weight_int = item["weight"]
         mvp_lines.append(f"- `{item.get('time', '')}` **{char}** +{weight_int} [{item.get('category', '')}] — {item.get('reason', '')}")
 
     mvp_lines.append("\n## Итоговый счёт по MVP-сигналам")
-    for char, value in sorted(score.items(), key=lambda x: x[1], reverse=True):
+    for char, value in sorted(data["mvp_scores"].items(), key=lambda x: x[1], reverse=True):
         mvp_lines.append(f"- **{char}**: {value}")
     write_md(paths.reports_dir / "mvp_candidates.md", mvp_lines)
 
-    session_report = [f"# Session report — {cfg['session_name']}", "", "## Summaries"] + summaries + ["", "## Files", "- actions_timeline.md", "- dice_stats.md", "- mvp_candidates.md"]
+    summaries_md = [f"- chunk {s['chunk_index']}: {s['summary']}" for s in data["summaries"]]
+    session_report = [f"# Session report — {cfg['session_name']}", "", "## Summaries"] + summaries_md + ["", "## Files", "- actions_timeline.md", "- dice_stats.md", "- mvp_candidates.md"]
     write_md(paths.reports_dir / "session_report.md", session_report)
 
     logger.info(f"Отчёты собраны: {paths.reports_dir}")
