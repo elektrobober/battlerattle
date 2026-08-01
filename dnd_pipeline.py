@@ -1562,6 +1562,138 @@ def run_ai_analysis(
     return True
 
 
+# ──────────────────────────────────────────────────────────────
+# Session synthesis (recap, quest hooks, key scenes for the PDF)
+# ──────────────────────────────────────────────────────────────
+
+
+def build_synthesis_input(results: list[dict[str, Any]], cfg: dict[str, Any]) -> dict[str, Any]:
+    data = compute_report_data(results, cfg)
+    mvp_top = sorted(data["mvp_events"], key=lambda e: e["weight"], reverse=True)[:30]
+    key_actions = [a for a in data["actions"] if a.get("importance") == "high"]
+    return {
+        "session": cfg["session_name"],
+        "summaries": data["summaries"],
+        "mvp_top": mvp_top,
+        "key_actions": key_actions,
+    }
+
+
+def synthesis_prompt(payload: dict[str, Any], party: list[dict[str, Any]]) -> str:
+    party_desc = "\n".join(
+        f"- {p.get('name')}: {p.get('appearance_en', '')}" for p in party
+    ) or "(нет описаний)"
+    data = json.dumps(payload, ensure_ascii=False, indent=2)
+    return f"""# Синтез D&D-сессии для иллюстрированной хроники
+
+Ты собираешь материалы для PDF-хроники сессии. Верни СТРОГО JSON.
+
+Задачи:
+1. recap — художественный пересказ сессии, 4-6 абзацев на русском,
+   «что было в прошлый раз» для игроков перед следующей игрой.
+2. quest_hooks — нерешённые нити, добытые сведения, открытые направления
+   (title + description, по-русски).
+3. scenes — 3-5 самых кинематографичных сцен сессии. Для каждой:
+   title (рус.), chunk_index, time (HH:MM:SS.mmm из данных),
+   image_prompt — промпт для генерации картинки НА АНГЛИЙСКОМ:
+   стиль dark fantasy oil painting, детали места и действия, внешность
+   участников из списка ниже. Первая сцена — самая эффектная (обложка).
+
+Внешность персонажей для image_prompt:
+{party_desc}
+
+Правила: не выдумывай события, опирайся только на данные. Имена
+персонажей в русских текстах не переводи.
+
+Данные сессии:
+
+{data}
+"""
+
+
+def make_synthesis_provider(ai: dict[str, Any], api_key: str | None) -> Any:
+    from ai_providers import (SYNTHESIS_REQUIRED_FIELDS, SYNTHESIS_SCHEMA,
+                              AnthropicProvider, OpenAICompatProvider)
+
+    if ai["provider"] == "anthropic":
+        return AnthropicProvider(
+            model=ai["model"], api_key=api_key, mode="direct",
+            max_output_tokens=ai["max_output_tokens"], concurrency=1,
+            schema=SYNTHESIS_SCHEMA,
+        )
+    return OpenAICompatProvider(
+        model=ai["model"], base_url=ai["base_url"], api_key=api_key,
+        max_output_tokens=ai["max_output_tokens"], concurrency=1,
+        normalize=normalize_json_text, required_fields=SYNTHESIS_REQUIRED_FIELDS,
+    )
+
+
+def write_image_prompts_md(synthesis: dict[str, Any], out_path: Path) -> None:
+    lines = [
+        "# Промпты для картинок сцен",
+        "",
+        "Сгенерируй картинки и положи файлы в report_assets/ с именами",
+        "scene1.png, scene2.png, ... (номер = номер сцены ниже; scene1 — обложка).",
+        "",
+    ]
+    for i, scene in enumerate(synthesis.get("scenes", []), start=1):
+        lines += [
+            f"## scene{i} — {scene.get('title', '')} (`{scene.get('time', '')}`)",
+            "",
+            "```",
+            scene.get("image_prompt", ""),
+            "```",
+            "",
+        ]
+    write_md(out_path, lines)
+
+
+def run_session_synthesis(
+    cfg: dict[str, Any], paths: Paths, party: list[dict[str, Any]], force: bool = False
+) -> dict[str, Any] | None:
+    """Сессионный синтез для PDF. None → недоступен (выключен/нет ключа/ошибка)."""
+    from ai_providers import ChunkJob
+
+    ai = resolve_ai_config(cfg)
+    if not ai["enabled"]:
+        logger.info("Синтез сессии пропущен: ai.enabled=false.")
+        return None
+    api_key = resolve_ai_api_key(ai)
+    if ai["provider"] == "anthropic" and not api_key:
+        logger.warning("Синтез сессии пропущен: нет API-ключа.")
+        return None
+
+    results = read_manual_results(paths)
+    if not results:
+        logger.warning("Синтез сессии пропущен: нет manual_ai_results/. Запусти ai-analyze.")
+        return None
+
+    payload = build_synthesis_input(results, cfg)
+    prompt = synthesis_prompt(payload, party)
+    input_hash = stable_hash({"prompt": prompt, "model": ai["model"], "provider": ai["provider"]})
+
+    state = load_ai_state(paths)
+    synth_path = paths.out_dir / "session_synthesis.json"
+    cached = state.get("synthesis")
+    if not force and cached and cached.get("input_hash") == input_hash and synth_path.exists():
+        logger.info("Синтез сессии: беру из кэша.")
+        return load_json(synth_path)
+
+    provider = make_synthesis_provider(ai, api_key)
+    logger.info(f"Синтез сессии: provider={ai['provider']}, model={ai['model']}…")
+    result = provider.analyze([ChunkJob(name="synthesis", prompt=prompt, chunk_hash=input_hash)])[0]
+    if result.data is None:
+        logger.warning(f"Синтез сессии не удался: {result.error}")
+        return None
+
+    write_json(synth_path, result.data)
+    write_image_prompts_md(result.data, paths.out_dir / "image_prompts.md")
+    state["synthesis"] = {"input_hash": input_hash, "model": ai["model"], "provider": ai["provider"]}
+    save_ai_state(paths, state)
+    logger.info(f"Синтез готов: {synth_path.name}, промпты картинок: image_prompts.md")
+    return result.data
+
+
 def compute_report_data(results: list[dict[str, Any]], cfg: dict[str, Any]) -> dict[str, Any]:
     """Общие расчёты для markdown-отчётов и PDF-хроники."""
     actions: list[dict[str, Any]] = []
