@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -220,6 +221,36 @@ def apply_quality_profile(cfg: dict[str, Any]) -> dict[str, Any]:
         profile = "balanced"
     # User config overrides profile defaults.
     return deep_merge(profiles[profile], cfg)
+
+
+# ──────────────────────────────────────────────────────────────
+# AI analysis config
+# ──────────────────────────────────────────────────────────────
+
+AI_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "provider": "anthropic",          # "anthropic" | "openai_compatible"
+    "model": "claude-sonnet-5",
+    "mode": "batch",                  # anthropic only: "batch" | "direct"
+    "base_url": None,                 # openai_compatible: e.g. http://localhost:11434/v1
+    "api_key_env": None,              # env var name; default ANTHROPIC_API_KEY for anthropic
+    "max_output_tokens": 8000,
+    "concurrency": 2,
+}
+
+
+def resolve_ai_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    ai = deep_merge(AI_DEFAULTS, cfg.get("ai") or {})
+    if ai["provider"] not in ("anthropic", "openai_compatible"):
+        raise ValueError(f"Неизвестный ai.provider: {ai['provider']} (жду anthropic или openai_compatible)")
+    if ai["provider"] == "openai_compatible" and not ai["base_url"]:
+        raise ValueError("Для ai.provider=openai_compatible нужен ai.base_url (например http://localhost:11434/v1)")
+    return ai
+
+
+def resolve_ai_api_key(ai: dict[str, Any]) -> str | None:
+    env_name = ai.get("api_key_env") or ("ANTHROPIC_API_KEY" if ai["provider"] == "anthropic" else None)
+    return os.environ.get(env_name) if env_name else None
 
 
 def normalize_json_text(text: str) -> str:
