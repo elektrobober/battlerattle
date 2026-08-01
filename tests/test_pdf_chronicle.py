@@ -288,3 +288,43 @@ class TestRenderPdf:
         dp.render_pdf(build_dir, out)
         assert out.exists()
         assert out.read_bytes()[:5] == b"%PDF-"
+
+
+class TestBuildPdfCli:
+    def _setup(self, tmp_path, monkeypatch):
+        session = tmp_path / "session"
+        session.mkdir()
+        dp.write_json(session / "config.json", {"session_name": "test"})
+        paths = dp.build_paths(session, "test")
+        dp.ensure_dirs(paths)
+        for i, res in enumerate(_results_fixture()):
+            dp.write_json(paths.manual_ai_dir / f"chunk_{i:03d}_events.json", res)
+        monkeypatch.setattr(dp, "run_session_synthesis",
+                            lambda cfg, paths, party, force=False: _synthesis_ok())
+        rendered = {}
+        monkeypatch.setattr(dp, "render_pdf",
+                            lambda build_dir, out: rendered.update({"build": build_dir, "out": out}) or out.write_bytes(b"%PDF-"))
+        return session, paths, rendered
+
+    def test_build_pdf_subcommand(self, tmp_path, monkeypatch):
+        session, paths, rendered = self._setup(tmp_path, monkeypatch)
+        rc = dp.main(["build-pdf", str(session)])
+        assert rc == 0
+        assert rendered["out"].name == "Session_test_Report.pdf"
+        assert (rendered["build"] / "data.json").exists()
+
+    def test_pdf_disabled_skips(self, tmp_path, monkeypatch):
+        session, paths, rendered = self._setup(tmp_path, monkeypatch)
+        dp.write_json(session / "config.json",
+                      {"session_name": "test", "pdf": {"enabled": False}})
+        rc = dp.main(["build-pdf", str(session)])
+        assert rc == 0
+        assert "out" not in rendered
+
+    def test_typst_missing_warns_not_crashes(self, tmp_path, monkeypatch):
+        session, paths, _ = self._setup(tmp_path, monkeypatch)
+        def boom(build_dir, out):
+            raise RuntimeError("Для сборки PDF нужен пакет typst: pip install typst")
+        monkeypatch.setattr(dp, "render_pdf", boom)
+        rc = dp.main(["build-pdf", str(session)])
+        assert rc == 0  # warning, не падение

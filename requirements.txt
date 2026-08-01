@@ -2,3 +2,4 @@ numpy>=1.24
 faster-whisper>=1.0.0
 mlx-whisper>=0.4.0; platform_system == "Darwin" and platform_machine == "arm64"
 anthropic>=0.75  # AI-этап (provider=anthropic); openai_compatible работает без него
+typst>=0.13  # PDF-хроника; pip-wheel, без системных зависимостей

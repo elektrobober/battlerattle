@@ -1886,6 +1886,44 @@ def compute_report_data(results: list[dict[str, Any]], cfg: dict[str, Any]) -> d
     }
 
 
+def build_pdf_pipeline(
+    session_dir: Path, cfg: dict[str, Any], paths: Paths, force_synthesis: bool = False
+) -> Path | None:
+    pdf_cfg = resolve_pdf_config(cfg)
+    if not pdf_cfg["enabled"]:
+        logger.info("PDF выключен (pdf.enabled=false).")
+        return None
+    results = read_manual_results(paths)
+    if not results:
+        logger.warning("PDF пропущен: нет manual_ai_results/. Сначала ai-analyze.")
+        return None
+
+    assets_dir = pdf_assets_dir(session_dir, pdf_cfg)
+    party = load_party(assets_dir)
+    synthesis = run_session_synthesis(cfg, paths, party, force=force_synthesis)
+    scene_images = find_scene_images(assets_dir)
+    if synthesis and not scene_images:
+        logger.info("Сцены: сгенерируй по out/image_prompts.md, положи в report_assets/ и запусти build-pdf.")
+
+    report_data = compute_report_data(results, cfg)
+    data = build_pdf_data(cfg, pdf_cfg, report_data, synthesis, party, scene_images)
+    template_dir = Path(__file__).parent / "pdf_template"
+    build_dir = stage_pdf_build(paths, data, party, scene_images, assets_dir, template_dir)
+    out_path = paths.out_dir / f"Session_{cfg['session_name']}_Report.pdf"
+    try:
+        render_pdf(build_dir, out_path)
+    except RuntimeError as e:
+        logger.warning(str(e))
+        return None
+    return out_path
+
+
+def cmd_build_pdf(args: argparse.Namespace) -> None:
+    session_dir, cfg, paths = load_cfg(args)
+    build_pdf_pipeline(session_dir, cfg, paths,
+                       force_synthesis=getattr(args, "force_synthesis", False))
+
+
 def build_reports(paths: Paths, cfg: dict[str, Any]) -> None:
     results = read_manual_results(paths)
     paths.reports_dir.mkdir(parents=True, exist_ok=True)
@@ -1973,6 +2011,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     make_prompts(chunk_paths, paths)
     if run_ai_analysis(chunk_paths, cfg, paths):
         build_reports(paths, cfg)
+        build_pdf_pipeline(session_dir, cfg, paths)
         logger.info("\nГотово: AI-анализ прошёл, отчёты в reports/.")
     else:
         logger.info("\nГотово. Дальше: открывай prompts/*.md, вручную прогоняй через AI и складывай JSON-ответы в manual_ai_results/.")
@@ -2083,6 +2122,13 @@ def main(argv: list[str] | None = None) -> int:
     p_report.add_argument("--config", help="path to config.json")
     p_report.add_argument("--quality-profile", choices=["gentle", "balanced", "aggressive"], help="override quality_profile")
     p_report.set_defaults(func=cmd_build_report)
+
+    p_pdf = sub.add_parser("build-pdf", parents=[verbosity], help="assemble the illustrated PDF chronicle")
+    p_pdf.add_argument("session_dir", help="folder with session files")
+    p_pdf.add_argument("--config", help="path to config.json")
+    p_pdf.add_argument("--force-synthesis", action="store_true", help="recompute session synthesis")
+    p_pdf.add_argument("--quality-profile", choices=["gentle", "balanced", "aggressive"], help="override quality_profile")
+    p_pdf.set_defaults(func=cmd_build_pdf)
 
     args = parser.parse_args(argv)
     configure_logging(getattr(args, "verbose", False), getattr(args, "quiet", False))

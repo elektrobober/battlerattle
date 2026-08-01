@@ -15,6 +15,13 @@
     "concurrency": 2
   },
 
+  "pdf": {
+    "enabled": true,
+    "assets_dir": null,
+    "campaign_title": "Хроники кампании",
+    "subtitle": "D&D · Forgotten Realms"
+  },
+
   "transcription_backend": "mlx",
   "model_size": "mlx-community/whisper-large-v3-turbo",
 
