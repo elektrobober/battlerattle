@@ -52,6 +52,28 @@ class TestEventsSchema:
         for key in ("session", "chunk_index", "scene_type", "actions", "dice_rolls", "mvp_signals", "summary"):
             assert key in props
 
+    def test_no_property_uses_a_list_as_type(self):
+        # Anthropic structured outputs only support a subset of JSON Schema
+        # (basic types, enum, const, anyOf, allOf, $ref) — a "type" that is
+        # itself a list (e.g. ["string", "null"]) isn't in that list.
+        def walk(node):
+            if isinstance(node, dict):
+                assert not isinstance(node.get("type"), list)
+                for v in node.values():
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+        walk(ap.EVENTS_SCHEMA)
+
+    def test_nullable_dice_fields_use_anyof(self):
+        props = ap.EVENTS_SCHEMA["properties"]["dice_rolls"]["items"]["properties"]
+        for key, expected_type in (
+            ("die", "string"), ("natural", "integer"),
+            ("modifier", "integer"), ("total", "integer"),
+        ):
+            assert props[key] == {"anyOf": [{"type": expected_type}, {"type": "null"}]}
+
 
 import io
 import urllib.error

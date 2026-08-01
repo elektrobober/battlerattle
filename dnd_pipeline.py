@@ -1497,7 +1497,10 @@ def run_ai_analysis(
     if resume_batch_id and pending:
         hash_by_name.update(pending.get("jobs", {}))
 
-    total = len(jobs) if jobs else len(hash_by_name)
+    if resume_batch_id and pending:
+        total = len(pending.get("jobs", {}))
+    else:
+        total = len(jobs)
     progress = {"n": 0}
 
     def on_result(res: Any) -> None:
@@ -1516,7 +1519,7 @@ def run_ai_analysis(
             logger.warning(f"AI [{progress['n']}/{total}]: {res.name} ошибка: {res.error}")
 
     provider = make_ai_provider(ai, api_key)
-    logger.info(f"AI-анализ: provider={ai['provider']}, model={ai['model']}, чанков в работе: {len(jobs)}")
+    logger.info(f"AI-анализ: provider={ai['provider']}, model={ai['model']}, чанков в работе: {total}")
 
     if ai["provider"] == "anthropic" and ai["mode"] == "batch":
         def on_batch_created(batch_id: str) -> None:
@@ -1536,6 +1539,11 @@ def run_ai_analysis(
         )
         state["pending_batch"] = None
         save_ai_state(paths, state)
+        if resume_batch_id and jobs:
+            logger.warning(
+                f"AI: {len(jobs)} чанков не входили в возобновлённый batch и остались без результата: "
+                f"{', '.join(j.name for j in jobs)}. Запусти ai-analyze ещё раз."
+            )
     else:
         results = provider.analyze(jobs, on_result=on_result)
 

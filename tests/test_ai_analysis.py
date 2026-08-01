@@ -1,4 +1,5 @@
 """Tests for the API-driven AI analysis stage in dnd_pipeline."""
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -205,6 +206,33 @@ class TestRunAiAnalysis:
         monkeypatch.setattr(dp, "make_ai_provider", lambda ai, key: fake)
         dp.run_ai_analysis(chunk_paths, _ai_cfg(mode="batch"), paths)
         assert fake.got_resume == "batch_old"
+
+    def test_resume_warns_about_chunks_not_in_pending_batch(self, tmp_path, monkeypatch, caplog):
+        # Resuming a batch that only covered chunk_000 while a fresh
+        # chunk_001 has shown up: the resumed batch can't include chunk_001,
+        # so it must never be silently dropped — it should be flagged.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        paths, chunk_paths = _make_session(tmp_path, [{"a": 1}, {"a": 2}])
+        dp.save_ai_state(paths, {
+            "chunks": {},
+            "pending_batch": {"batch_id": "batch_old", "provider": "anthropic",
+                              "model": "claude-sonnet-5", "jobs": {"chunk_000": "h"}},
+        })
+        fake = FakeProvider([AIResult(name="chunk_000", data={"summary": "ok"})])
+        monkeypatch.setattr(dp, "make_ai_provider", lambda ai, key: fake)
+
+        with caplog.at_level(logging.INFO, logger="dnd_pipeline"):
+            dp.run_ai_analysis(chunk_paths, _ai_cfg(mode="batch"), paths)
+
+        messages = [r.message for r in caplog.records]
+        assert (paths.manual_ai_dir / "chunk_000_events.json").exists()
+        assert not (paths.manual_ai_dir / "chunk_001_events.json").exists()
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("chunk_001" in r.message for r in warnings)
+        # progress counter should reflect the pending batch's job count (1),
+        # not the freshly-built jobs list (2) — no "[N/2]" style logs.
+        assert any("чанков в работе: 1" in m for m in messages)
+        assert any("AI [1/1]: chunk_000" in m for m in messages)
 
     def test_failed_chunks_do_not_write_files(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
