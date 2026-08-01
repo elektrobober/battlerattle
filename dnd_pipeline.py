@@ -1786,7 +1786,7 @@ def stage_pdf_build(
     party: list[dict[str, Any]],
     scene_images: dict[int, Path],
     assets_dir: Path,
-    template_dir: Path,
+    template_dir: Path = Path(__file__).parent / "pdf_template",
 ) -> Path:
     build_dir = paths.out_dir / "pdf_build"
     if build_dir.exists():
