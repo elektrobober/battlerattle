@@ -4,6 +4,17 @@
 
   "quality_profile": "balanced",
 
+  "ai": {
+    "enabled": true,
+    "provider": "anthropic",
+    "model": "claude-sonnet-5",
+    "mode": "batch",
+    "base_url": null,
+    "api_key_env": null,
+    "max_output_tokens": 8000,
+    "concurrency": 2
+  },
+
   "transcription_backend": "mlx",
   "model_size": "mlx-community/whisper-large-v3-turbo",
 

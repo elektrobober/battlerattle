@@ -234,3 +234,37 @@ class TestMakeAiProvider:
         p = dp.make_ai_provider(ai, "sk-test")
         assert type(p).__name__ == "AnthropicProvider"
         assert p.mode == "batch"
+
+
+class TestCli:
+    def _write_cfg(self, tmp_path):
+        dp.write_json(tmp_path / "config.json", {"session_name": "test", "ai": {"enabled": True}})
+
+    def test_ai_analyze_requires_chunks(self, tmp_path, capsys):
+        self._write_cfg(tmp_path)
+        rc = dp.main(["ai-analyze", str(tmp_path)])
+        assert rc == 1  # понятная ошибка: чанков нет, сначала prepare-ai
+
+    def test_ai_analyze_runs_analysis_and_reports(self, tmp_path, monkeypatch):
+        self._write_cfg(tmp_path)
+        paths, _ = _make_session(tmp_path, [{"a": 1}])
+        calls = {}
+        monkeypatch.setattr(dp, "run_ai_analysis",
+                            lambda chunk_paths, cfg, paths, force=False: calls.update(
+                                {"chunks": [p.name for p in chunk_paths], "force": force}) or True)
+        monkeypatch.setattr(dp, "build_reports", lambda paths, cfg: calls.update({"reports": True}))
+        rc = dp.main(["ai-analyze", str(tmp_path), "--force"])
+        assert rc == 0
+        assert calls["chunks"] == ["chunk_000.json"]
+        assert calls["force"] is True
+        assert calls["reports"] is True
+
+    def test_ai_analyze_manual_mode_skips_reports(self, tmp_path, monkeypatch):
+        self._write_cfg(tmp_path)
+        paths, _ = _make_session(tmp_path, [{"a": 1}])
+        monkeypatch.setattr(dp, "run_ai_analysis", lambda *a, **k: False)
+        called = {"reports": False}
+        monkeypatch.setattr(dp, "build_reports", lambda paths, cfg: called.update({"reports": True}))
+        rc = dp.main(["ai-analyze", str(tmp_path)])
+        assert rc == 0
+        assert called["reports"] is False

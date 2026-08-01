@@ -1654,7 +1654,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     write_quality_report(raw, clean, cfg, paths)
     chunk_paths = make_chunks(clean, cfg, paths)
     make_prompts(chunk_paths, paths)
-    logger.info("\nГотово. Дальше: открывай prompts/*.md, вручную прогоняй через AI и складывай JSON-ответы в manual_ai_results/.")
+    if run_ai_analysis(chunk_paths, cfg, paths):
+        build_reports(paths, cfg)
+        logger.info("\nГотово: AI-анализ прошёл, отчёты в reports/.")
+    else:
+        logger.info("\nГотово. Дальше: открывай prompts/*.md, вручную прогоняй через AI и складывай JSON-ответы в manual_ai_results/.")
 
 
 
@@ -1702,6 +1706,17 @@ def cmd_prepare_ai(args: argparse.Namespace) -> None:
     make_prompts(chunk_paths, paths)
 
 
+def cmd_ai_analyze(args: argparse.Namespace) -> None:
+    session_dir, cfg, paths = load_cfg(args)
+    chunk_paths = sorted(paths.chunks_dir.glob("chunk_*.json"))
+    if not chunk_paths:
+        raise RuntimeError(
+            f"Нет чанков в {paths.chunks_dir}. Сначала: python dnd_pipeline.py prepare-ai {session_dir}"
+        )
+    if run_ai_analysis(chunk_paths, cfg, paths, force=getattr(args, "force", False)):
+        build_reports(paths, cfg)
+
+
 def cmd_build_report(args: argparse.Namespace) -> None:
     session_dir, cfg, paths = load_cfg(args)
     build_reports(paths, cfg)
@@ -1738,6 +1753,13 @@ def main(argv: list[str] | None = None) -> int:
     p_ai.add_argument("--config", help="path to config.json")
     p_ai.add_argument("--quality-profile", choices=["gentle", "balanced", "aggressive"], help="override quality_profile")
     p_ai.set_defaults(func=cmd_prepare_ai)
+
+    p_aa = sub.add_parser("ai-analyze", parents=[verbosity], help="run AI analysis over chunks via API, then build reports")
+    p_aa.add_argument("session_dir", help="folder with session files")
+    p_aa.add_argument("--config", help="path to config.json")
+    p_aa.add_argument("--force", action="store_true", help="recompute all chunks even if results exist")
+    p_aa.add_argument("--quality-profile", choices=["gentle", "balanced", "aggressive"], help="override quality_profile")
+    p_aa.set_defaults(func=cmd_ai_analyze)
 
     p_report = sub.add_parser("build-report", parents=[verbosity], help="build reports from manual_ai_results/*.json")
     p_report.add_argument("session_dir", help="folder with session files")
