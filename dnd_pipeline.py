@@ -1397,6 +1397,51 @@ def read_manual_results(paths: Paths) -> list[dict[str, Any]]:
     return rows
 
 
+# ──────────────────────────────────────────────────────────────
+# AI analysis stage (API providers; manual mode stays the fallback)
+# ──────────────────────────────────────────────────────────────
+
+
+def ai_state_path(paths: Paths) -> Path:
+    return paths.cache_dir / "ai_state.json"
+
+
+def load_ai_state(paths: Paths) -> dict[str, Any]:
+    p = ai_state_path(paths)
+    if p.exists():
+        state = load_json(p)
+        state.setdefault("chunks", {})
+        state.setdefault("pending_batch", None)
+        return state
+    return {"chunks": {}, "pending_batch": None}
+
+
+def save_ai_state(paths: Paths, state: dict[str, Any]) -> None:
+    write_json(ai_state_path(paths), state)
+
+
+def build_ai_jobs(
+    chunk_paths: list[Path], paths: Paths, state: dict[str, Any], force: bool
+) -> tuple[list[Any], int]:
+    from ai_providers import ChunkJob
+
+    jobs: list[Any] = []
+    skipped = 0
+    for p in sorted(chunk_paths):
+        name = p.stem
+        chunk = load_json(p)
+        h = stable_hash(chunk)
+        out = paths.manual_ai_dir / f"{name}_events.json"
+        if out.exists() and not force:
+            entry = state.get("chunks", {}).get(name)
+            # entry is None → файл положен руками, не трогаем.
+            if entry is None or entry.get("chunk_hash") == h:
+                skipped += 1
+                continue
+        jobs.append(ChunkJob(name=name, prompt=prompt_for_chunk(chunk), chunk_hash=h))
+    return jobs, skipped
+
+
 def build_reports(paths: Paths, cfg: dict[str, Any]) -> None:
     results = read_manual_results(paths)
     paths.reports_dir.mkdir(parents=True, exist_ok=True)
