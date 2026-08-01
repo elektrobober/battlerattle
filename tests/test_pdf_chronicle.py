@@ -194,3 +194,60 @@ class TestPdfAssets:
         scenes = dp.find_scene_images(tmp_path)
         assert sorted(scenes) == [1, 3]
         assert scenes[1].name == "scene1_tavern.png"
+
+
+class TestBuildPdfData:
+    def _base_args(self, tmp_path):
+        report_data = dp.compute_report_data(_results_fixture(), {"session_name": "t"})
+        synthesis = _synthesis_ok()
+        party = [{"name": "Ангрон", "class_ru": "Воин", "player": "Дима", "ref": "ref.jpg",
+                  "appearance_en": "warrior"}]
+        (tmp_path / "scene1.png").write_bytes(b"png")
+        scene_images = {1: tmp_path / "scene1.png"}
+        return report_data, synthesis, party, scene_images
+
+    def test_full_data(self, tmp_path):
+        report_data, synthesis, party, scenes = self._base_args(tmp_path)
+        data = dp.build_pdf_data({"session_name": "t"}, dp.resolve_pdf_config({}),
+                                 report_data, synthesis, party, scenes)
+        assert data["session"] == "t"
+        assert data["campaign_title"] == "Хроники кампании"
+        assert data["recap"].startswith("Партия")
+        assert data["scenes"][0]["file"] == "images/scene1.png"
+        assert data["party"][0]["ref_file"] is None  # ref.jpg не существует на диске
+        assert data["mvp_scores"][0] == {"character": "Гай", "score": 3}
+
+    def test_no_synthesis_degrades(self, tmp_path):
+        report_data, _, party, scenes = self._base_args(tmp_path)
+        data = dp.build_pdf_data({"session_name": "t"}, dp.resolve_pdf_config({}),
+                                 report_data, None, party, scenes)
+        assert data["recap"] == ""
+        assert data["quest_hooks"] == []
+        assert data["scenes"] == []
+
+
+class TestStagePdfBuild:
+    def test_stages_everything(self, tmp_path):
+        paths = dp.build_paths(tmp_path / "session", "t")
+        dp.ensure_dirs(paths)
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (assets / "scene1.png").write_bytes(b"png")
+        (assets / "ref.jpg").write_bytes(b"jpg")
+        template_dir = tmp_path / "tpl"
+        template_dir.mkdir()
+        (template_dir / "report.typ").write_text("#let data = json(\"data.json\")")
+
+        party = [{"name": "Ангрон", "ref": "ref.jpg"}]
+        scene_images = {1: assets / "scene1.png"}
+        report_data = dp.compute_report_data(_results_fixture(), {"session_name": "t"})
+        data = dp.build_pdf_data({"session_name": "t"}, dp.resolve_pdf_config({}),
+                                 report_data, _synthesis_ok(), party, scene_images)
+
+        build_dir = dp.stage_pdf_build(paths, data, party, scene_images, assets, template_dir)
+        assert (build_dir / "report.typ").exists()
+        assert (build_dir / "data.json").exists()
+        assert (build_dir / "images" / "scene1.png").exists()
+        assert (build_dir / "images" / "ref.jpg").exists()
+        saved = dp.load_json(build_dir / "data.json")
+        assert saved["party"][0]["ref_file"] == "images/ref.jpg"

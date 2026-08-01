@@ -1739,6 +1739,78 @@ def find_scene_images(assets_dir: Path) -> dict[int, Path]:
     return scenes
 
 
+def build_pdf_data(
+    cfg: dict[str, Any],
+    pdf_cfg: dict[str, Any],
+    report_data: dict[str, Any],
+    synthesis: dict[str, Any] | None,
+    party: list[dict[str, Any]],
+    scene_images: dict[int, Path],
+) -> dict[str, Any]:
+    scenes = []
+    for i, scene in enumerate((synthesis or {}).get("scenes", []), start=1):
+        img = scene_images.get(i)
+        scenes.append({
+            **scene,
+            "file": f"images/scene{i}{img.suffix.lower()}" if img else None,
+        })
+    mvp_scores = [
+        {"character": char, "score": score}
+        for char, score in sorted(report_data["mvp_scores"].items(), key=lambda x: x[1], reverse=True)
+    ]
+    dice_stats = [
+        {"character": char, **st}
+        for char, st in sorted(report_data["dice_stats"].items(), key=lambda x: x[1]["avg"], reverse=True)
+    ]
+    return {
+        "session": cfg["session_name"],
+        "campaign_title": pdf_cfg["campaign_title"],
+        "subtitle": pdf_cfg["subtitle"],
+        "recap": (synthesis or {}).get("recap", ""),
+        "quest_hooks": (synthesis or {}).get("quest_hooks", []),
+        "scenes": scenes,
+        "party": [{**m, "ref_file": None} for m in party],
+        "mvp_scores": mvp_scores,
+        "mvp_categories": report_data["mvp_categories"],
+        "mvp_events": report_data["mvp_events"],
+        "dice_stats": dice_stats,
+        "dice": report_data["dice"],
+        "actions": report_data["actions"],
+        "summaries": report_data["summaries"],
+    }
+
+
+def stage_pdf_build(
+    paths: Paths,
+    data: dict[str, Any],
+    party: list[dict[str, Any]],
+    scene_images: dict[int, Path],
+    assets_dir: Path,
+    template_dir: Path,
+) -> Path:
+    build_dir = paths.out_dir / "pdf_build"
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+    (build_dir / "images").mkdir(parents=True)
+
+    shutil.copy2(template_dir / "report.typ", build_dir / "report.typ")
+    fonts_src = template_dir / "fonts"
+    if fonts_src.is_dir():
+        shutil.copytree(fonts_src, build_dir / "fonts")
+
+    for i, img in scene_images.items():
+        shutil.copy2(img, build_dir / "images" / f"scene{i}{img.suffix.lower()}")
+
+    for idx, member in enumerate(party):
+        ref_name = member.get("ref")
+        if ref_name and (assets_dir / ref_name).exists():
+            shutil.copy2(assets_dir / ref_name, build_dir / "images" / ref_name)
+            data["party"][idx]["ref_file"] = f"images/{ref_name}"
+
+    write_json(build_dir / "data.json", data)
+    return build_dir
+
+
 def compute_report_data(results: list[dict[str, Any]], cfg: dict[str, Any]) -> dict[str, Any]:
     """Общие расчёты для markdown-отчётов и PDF-хроники."""
     actions: list[dict[str, Any]] = []
