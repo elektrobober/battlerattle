@@ -1811,6 +1811,23 @@ def stage_pdf_build(
     return build_dir
 
 
+def render_pdf(build_dir: Path, out_path: Path) -> None:
+    try:
+        import typst
+    except ImportError as e:
+        raise RuntimeError("Для сборки PDF нужен пакет typst: pip install typst") from e
+
+    fonts_dir = build_dir / "fonts"
+    font_paths = [str(fonts_dir)] if fonts_dir.is_dir() else []
+    typst.compile(
+        str(build_dir / "report.typ"),
+        output=str(out_path),
+        root=str(build_dir),
+        font_paths=font_paths,
+    )
+    logger.info(f"PDF собран: {out_path}")
+
+
 def compute_report_data(results: list[dict[str, Any]], cfg: dict[str, Any]) -> dict[str, Any]:
     """Общие расчёты для markdown-отчётов и PDF-хроники."""
     actions: list[dict[str, Any]] = []

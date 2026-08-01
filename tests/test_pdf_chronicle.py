@@ -1,6 +1,7 @@
 # tests/test_pdf_chronicle.py
 """Tests for the PDF chronicle stage: report data, synthesis, assets, staging."""
 import json
+import shutil
 
 import pytest
 
@@ -251,3 +252,39 @@ class TestStagePdfBuild:
         assert (build_dir / "images" / "ref.jpg").exists()
         saved = dp.load_json(build_dir / "data.json")
         assert saved["party"][0]["ref_file"] == "images/ref.jpg"
+
+
+def _staged_build(tmp_path):
+    paths = dp.build_paths(tmp_path / "session", "t")
+    dp.ensure_dirs(paths)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    report_data = dp.compute_report_data(_results_fixture(), {"session_name": "t"})
+    data = dp.build_pdf_data({"session_name": "t"}, dp.resolve_pdf_config({}),
+                             report_data, _synthesis_ok(), [], {})
+    template_dir = dp.Path(dp.__file__).parent / "pdf_template"
+    return dp.stage_pdf_build(paths, data, [], {}, assets, template_dir)
+
+
+class TestRenderPdf:
+    def test_missing_typst_raises_helpful_error(self, tmp_path, monkeypatch):
+        import builtins
+        real_import = builtins.__import__
+
+        def no_typst(name, *a, **k):
+            if name == "typst":
+                raise ImportError("no module")
+            return real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", no_typst)
+        with pytest.raises(RuntimeError, match="pip install typst"):
+            dp.render_pdf(tmp_path, tmp_path / "out.pdf")
+
+    @pytest.mark.slow
+    def test_compiles_fixture_to_pdf(self, tmp_path):
+        pytest.importorskip("typst")
+        build_dir = _staged_build(tmp_path)
+        out = tmp_path / "report.pdf"
+        dp.render_pdf(build_dir, out)
+        assert out.exists()
+        assert out.read_bytes()[:5] == b"%PDF-"
