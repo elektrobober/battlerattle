@@ -2,7 +2,7 @@
 
 Локальный пайплайн для многодорожечной записи D&D-сессии с PodTrak.
 
-Цель: положить WAV-дорожки в папку, запустить одну команду и получить материал, с которым дальше можно работать: clean transcript, SRT, JSONL, чанки и промпты для ручного AI-анализа без API-токенов.
+Цель: положить WAV-дорожки в папку, запустить одну команду и получить материал, с которым дальше можно работать: clean transcript, SRT, JSONL, чанки и готовые отчёты по AI-анализу.
 
 ## Что делает
 
@@ -20,8 +20,9 @@ PodTrak WAV
 → дедупликация по времени + тексту + громкости
 → clean JSONL/TXT/SRT
 → chunks/*.json
-→ prompts/*.md для ручного AI-этапа
-→ reports/*.md после ручных AI-ответов
+→ AI-анализ через API (ai.enabled), провайдер anthropic или openai_compatible
+  → ручной режим (prompts/*.md) как fallback, если API недоступен
+→ reports/*.md
 ```
 
 ## Почему v3 быстрее на Mac M3 Max
@@ -218,9 +219,50 @@ clean/dnd_2_clean.jsonl
 
 Именно его лучше использовать для анализа действий, бросков и MVP.
 
-## Ручной AI-этап без API
+## AI-этап через API
 
-После `run` открой `prompts/*.md`, копируй промпт в ChatGPT/локальную LLM, а JSON-ответ сохраняй в:
+Если в `config.json` включено `ai.enabled`, `run` сам прогоняет чанки через LLM и сразу собирает отчёты — руками ничего копировать не нужно.
+
+Два провайдера:
+
+- `anthropic` — облачный Claude. По умолчанию работает через Batch API (`ai.mode: "batch"`, дешевле и не жмёт rate limit; можно переключить на `"direct"` для мгновенного прохода без батча). Ключ берётся из переменной окружения `ANTHROPIC_API_KEY` (или другой, если задать `ai.api_key_env`) — в `config.json` ключ никогда не хранится.
+- `openai_compatible` — любой сервер с OpenAI-совместимым `/chat/completions`, например локальный Ollama или LM Studio. Обязательно нужен `ai.base_url` (например `http://localhost:11434/v1`).
+
+Если API недоступен (ключа нет, `ai.enabled` выключен или провайдер вернул ошибку), пайплайн сам откатывается в ручной режим — см. ниже.
+
+Повторный запуск или докачка недостающих чанков (без пересчёта уже готовых — они пропускаются по хэшу):
+
+```bash
+python3 dnd_pipeline.py ai-analyze /path/to/session \
+  --config /path/to/session/config.json
+```
+
+Пересчитать всё заново (например, другой моделью после правки `ai.model`):
+
+```bash
+python3 dnd_pipeline.py ai-analyze /path/to/session \
+  --config /path/to/session/config.json \
+  --force
+```
+
+Результаты по каждому чанку складываются в `manual_ai_results/*_events.json` — в том же формате, что и при ручном режиме, — так что `build-report` работает одинаково для обоих путей.
+
+### Конфиг-поля `ai.*`
+
+| Поле | По умолчанию | Что делает |
+| --- | --- | --- |
+| `ai.enabled` | `false` | Включает автоматический AI-этап через API. Если `false` — сразу ручной режим. |
+| `ai.provider` | `"anthropic"` | `"anthropic"` (облако) или `"openai_compatible"` (любой OpenAI-совместимый эндпоинт, локальный или удалённый). |
+| `ai.model` | `"claude-sonnet-5"` | Имя модели у выбранного провайдера. |
+| `ai.mode` | `"batch"` | Только для `anthropic`: `"batch"` (Batch API, дешевле, с задержкой) или `"direct"` (обычные запросы). |
+| `ai.base_url` | `null` | Обязателен для `openai_compatible` — URL сервера, например `http://localhost:11434/v1`. |
+| `ai.api_key_env` | `null` | Имя переменной окружения с ключом. Для `anthropic` по умолчанию `ANTHROPIC_API_KEY`; для `openai_compatible` по умолчанию ключ не требуется. |
+| `ai.max_output_tokens` | `8000` | Лимит токенов на ответ модели по одному чанку. |
+| `ai.concurrency` | `2` | Сколько чанков обрабатывать параллельно (для `direct`-режима/`openai_compatible`). |
+
+## Ручной AI-этап без API (fallback)
+
+Если `ai.enabled` выключен или API недоступен, `run` (и `ai-analyze`) сам откатывается в ручной режим: открой `prompts/*.md`, копируй промпт в ChatGPT/локальную LLM, а JSON-ответ сохраняй в:
 
 ```text
 manual_ai_results/chunk_000_events.json
@@ -284,7 +326,7 @@ _dnd_pipeline_out/<session>/reports/quality_report.md
 
 ## Подробность вывода
 
-Доступны на всех подкомандах (`run`, `rebuild`, `prepare-ai`, `build-report`):
+Доступны на всех подкомандах (`run`, `rebuild`, `prepare-ai`, `ai-analyze`, `build-report`):
 
 - `-v`, `--verbose` — показывает построчный транскрипт и debug-детали
 - `-q`, `--quiet` — только предупреждения и ошибки (тихий режим для регулярных прогонов)

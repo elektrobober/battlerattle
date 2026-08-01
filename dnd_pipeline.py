@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -220,6 +221,36 @@ def apply_quality_profile(cfg: dict[str, Any]) -> dict[str, Any]:
         profile = "balanced"
     # User config overrides profile defaults.
     return deep_merge(profiles[profile], cfg)
+
+
+# ──────────────────────────────────────────────────────────────
+# AI analysis config
+# ──────────────────────────────────────────────────────────────
+
+AI_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "provider": "anthropic",          # "anthropic" | "openai_compatible"
+    "model": "claude-sonnet-5",
+    "mode": "batch",                  # anthropic only: "batch" | "direct"
+    "base_url": None,                 # openai_compatible: e.g. http://localhost:11434/v1
+    "api_key_env": None,              # env var name; default ANTHROPIC_API_KEY for anthropic
+    "max_output_tokens": 8000,
+    "concurrency": 2,
+}
+
+
+def resolve_ai_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    ai = deep_merge(AI_DEFAULTS, cfg.get("ai") or {})
+    if ai["provider"] not in ("anthropic", "openai_compatible"):
+        raise ValueError(f"Неизвестный ai.provider: {ai['provider']} (жду anthropic или openai_compatible)")
+    if ai["provider"] == "openai_compatible" and not ai["base_url"]:
+        raise ValueError("Для ai.provider=openai_compatible нужен ai.base_url (например http://localhost:11434/v1)")
+    return ai
+
+
+def resolve_ai_api_key(ai: dict[str, Any]) -> str | None:
+    env_name = ai.get("api_key_env") or ("ANTHROPIC_API_KEY" if ai["provider"] == "anthropic" else None)
+    return os.environ.get(env_name) if env_name else None
 
 
 def normalize_json_text(text: str) -> str:
@@ -1366,6 +1397,166 @@ def read_manual_results(paths: Paths) -> list[dict[str, Any]]:
     return rows
 
 
+# ──────────────────────────────────────────────────────────────
+# AI analysis stage (API providers; manual mode stays the fallback)
+# ──────────────────────────────────────────────────────────────
+
+
+def ai_state_path(paths: Paths) -> Path:
+    return paths.cache_dir / "ai_state.json"
+
+
+def load_ai_state(paths: Paths) -> dict[str, Any]:
+    p = ai_state_path(paths)
+    if p.exists():
+        state = load_json(p)
+        state.setdefault("chunks", {})
+        state.setdefault("pending_batch", None)
+        return state
+    return {"chunks": {}, "pending_batch": None}
+
+
+def save_ai_state(paths: Paths, state: dict[str, Any]) -> None:
+    write_json(ai_state_path(paths), state)
+
+
+def build_ai_jobs(
+    chunk_paths: list[Path], paths: Paths, state: dict[str, Any], force: bool
+) -> tuple[list[Any], int]:
+    from ai_providers import ChunkJob
+
+    jobs: list[Any] = []
+    skipped = 0
+    for p in sorted(chunk_paths):
+        name = p.stem
+        chunk = load_json(p)
+        h = stable_hash(chunk)
+        out = paths.manual_ai_dir / f"{name}_events.json"
+        if out.exists() and not force:
+            entry = state.get("chunks", {}).get(name)
+            # entry is None → файл положен руками, не трогаем.
+            if entry is None or entry.get("chunk_hash") == h:
+                skipped += 1
+                continue
+        jobs.append(ChunkJob(name=name, prompt=prompt_for_chunk(chunk), chunk_hash=h))
+    return jobs, skipped
+
+
+def make_ai_provider(ai: dict[str, Any], api_key: str | None) -> Any:
+    if ai["provider"] == "anthropic":
+        from ai_providers import AnthropicProvider
+
+        return AnthropicProvider(
+            model=ai["model"],
+            api_key=api_key,
+            mode=ai["mode"],
+            max_output_tokens=ai["max_output_tokens"],
+            concurrency=ai["concurrency"],
+        )
+    from ai_providers import OpenAICompatProvider
+
+    return OpenAICompatProvider(
+        model=ai["model"],
+        base_url=ai["base_url"],
+        api_key=api_key,
+        max_output_tokens=ai["max_output_tokens"],
+        concurrency=ai["concurrency"],
+        normalize=normalize_json_text,
+    )
+
+
+def run_ai_analysis(
+    chunk_paths: list[Path], cfg: dict[str, Any], paths: Paths, force: bool = False
+) -> bool:
+    """Run chunks through the configured LLM provider. Returns False → manual mode."""
+    ai = resolve_ai_config(cfg)
+    if not ai["enabled"]:
+        logger.info("AI-этап выключен (ai.enabled=false) — ручной режим.")
+        return False
+    api_key = resolve_ai_api_key(ai)
+    if ai["provider"] == "anthropic" and not api_key:
+        env_name = ai.get("api_key_env") or "ANTHROPIC_API_KEY"
+        logger.warning(f"Нет API-ключа: переменная {env_name} пуста. Падаю в ручной режим.")
+        return False
+
+    state = load_ai_state(paths)
+    pending = state.get("pending_batch")
+    resume_batch_id = None
+    if pending and pending.get("provider") == ai["provider"] and pending.get("model") == ai["model"]:
+        resume_batch_id = pending["batch_id"]
+        logger.info(f"Продолжаю незавершённый batch: {resume_batch_id}")
+
+    jobs, skipped = build_ai_jobs(chunk_paths, paths, state, force)
+    if skipped:
+        logger.info(f"AI: пропущено {skipped} чанков — результаты уже есть")
+    if not jobs and not resume_batch_id:
+        logger.info("AI: все чанки уже посчитаны.")
+        return True
+
+    hash_by_name = {j.name: j.chunk_hash for j in jobs}
+    if resume_batch_id and pending:
+        hash_by_name.update(pending.get("jobs", {}))
+
+    if resume_batch_id and pending:
+        total = len(pending.get("jobs", {}))
+    else:
+        total = len(jobs)
+    progress = {"n": 0}
+
+    def on_result(res: Any) -> None:
+        progress["n"] += 1
+        if res.data is not None:
+            write_json(paths.manual_ai_dir / f"{res.name}_events.json", res.data)
+            state["chunks"][res.name] = {
+                "chunk_hash": hash_by_name.get(res.name, ""),
+                "model": ai["model"],
+                "provider": ai["provider"],
+                "status": "done",
+            }
+            save_ai_state(paths, state)
+            logger.info(f"AI [{progress['n']}/{total}]: {res.name} готов")
+        else:
+            logger.warning(f"AI [{progress['n']}/{total}]: {res.name} ошибка: {res.error}")
+
+    provider = make_ai_provider(ai, api_key)
+    logger.info(f"AI-анализ: provider={ai['provider']}, model={ai['model']}, чанков в работе: {total}")
+
+    if ai["provider"] == "anthropic" and ai["mode"] == "batch":
+        def on_batch_created(batch_id: str) -> None:
+            state["pending_batch"] = {
+                "batch_id": batch_id,
+                "provider": ai["provider"],
+                "model": ai["model"],
+                "jobs": hash_by_name,
+            }
+            save_ai_state(paths, state)
+
+        results = provider.analyze(
+            jobs,
+            on_result=on_result,
+            resume_batch_id=resume_batch_id,
+            on_batch_created=on_batch_created,
+        )
+        state["pending_batch"] = None
+        save_ai_state(paths, state)
+        if resume_batch_id and jobs:
+            logger.warning(
+                f"AI: {len(jobs)} чанков не входили в возобновлённый batch и остались без результата: "
+                f"{', '.join(j.name for j in jobs)}. Запусти ai-analyze ещё раз."
+            )
+    else:
+        results = provider.analyze(jobs, on_result=on_result)
+
+    failed = [r for r in results if r.data is None]
+    if failed:
+        names = ", ".join(r.name for r in failed)
+        logger.warning(
+            f"AI: {len(failed)} чанков без результата: {names}. "
+            f"Добить: python dnd_pipeline.py ai-analyze <session_dir>"
+        )
+    return True
+
+
 def build_reports(paths: Paths, cfg: dict[str, Any]) -> None:
     results = read_manual_results(paths)
     paths.reports_dir.mkdir(parents=True, exist_ok=True)
@@ -1471,7 +1662,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     write_quality_report(raw, clean, cfg, paths)
     chunk_paths = make_chunks(clean, cfg, paths)
     make_prompts(chunk_paths, paths)
-    logger.info("\nГотово. Дальше: открывай prompts/*.md, вручную прогоняй через AI и складывай JSON-ответы в manual_ai_results/.")
+    if run_ai_analysis(chunk_paths, cfg, paths):
+        build_reports(paths, cfg)
+        logger.info("\nГотово: AI-анализ прошёл, отчёты в reports/.")
+    else:
+        logger.info("\nГотово. Дальше: открывай prompts/*.md, вручную прогоняй через AI и складывай JSON-ответы в manual_ai_results/.")
 
 
 
@@ -1519,6 +1714,17 @@ def cmd_prepare_ai(args: argparse.Namespace) -> None:
     make_prompts(chunk_paths, paths)
 
 
+def cmd_ai_analyze(args: argparse.Namespace) -> None:
+    session_dir, cfg, paths = load_cfg(args)
+    chunk_paths = sorted(paths.chunks_dir.glob("chunk_*.json"))
+    if not chunk_paths:
+        raise RuntimeError(
+            f"Нет чанков в {paths.chunks_dir}. Сначала: python dnd_pipeline.py prepare-ai {session_dir}"
+        )
+    if run_ai_analysis(chunk_paths, cfg, paths, force=getattr(args, "force", False)):
+        build_reports(paths, cfg)
+
+
 def cmd_build_report(args: argparse.Namespace) -> None:
     session_dir, cfg, paths = load_cfg(args)
     build_reports(paths, cfg)
@@ -1555,6 +1761,13 @@ def main(argv: list[str] | None = None) -> int:
     p_ai.add_argument("--config", help="path to config.json")
     p_ai.add_argument("--quality-profile", choices=["gentle", "balanced", "aggressive"], help="override quality_profile")
     p_ai.set_defaults(func=cmd_prepare_ai)
+
+    p_aa = sub.add_parser("ai-analyze", parents=[verbosity], help="run AI analysis over chunks via API, then build reports")
+    p_aa.add_argument("session_dir", help="folder with session files")
+    p_aa.add_argument("--config", help="path to config.json")
+    p_aa.add_argument("--force", action="store_true", help="recompute all chunks even if results exist")
+    p_aa.add_argument("--quality-profile", choices=["gentle", "balanced", "aggressive"], help="override quality_profile")
+    p_aa.set_defaults(func=cmd_ai_analyze)
 
     p_report = sub.add_parser("build-report", parents=[verbosity], help="build reports from manual_ai_results/*.json")
     p_report.add_argument("session_dir", help="folder with session files")
