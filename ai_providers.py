@@ -99,16 +99,56 @@ EVENTS_SCHEMA: dict[str, Any] = {
     },
 }
 
+SYNTHESIS_REQUIRED_FIELDS = ("recap", "quest_hooks", "scenes")
 
-def parse_model_json(name: str, text: str, normalize: Callable[[str], str]) -> AIResult:
+# Схема сессионного синтеза: рекап, зацепки, ключевые сцены с промптами.
+SYNTHESIS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["recap", "quest_hooks", "scenes"],
+    "properties": {
+        "recap": {"type": "string"},
+        "quest_hooks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["title", "description"],
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+            },
+        },
+        "scenes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["title", "chunk_index", "time", "image_prompt"],
+                "properties": {
+                    "title": {"type": "string"},
+                    "chunk_index": {"type": "integer"},
+                    "time": {"type": "string"},
+                    "image_prompt": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+
+def parse_model_json(name: str, text: str, normalize: Callable[[str], str], required_fields: tuple[str, ...] | None = None) -> AIResult:
     """Parse a model's text answer into a result dict; soft-fail on garbage."""
+    if required_fields is None:
+        required_fields = REQUIRED_RESULT_FIELDS
     try:
         data = json.loads(normalize(text))
     except ValueError as e:
         return AIResult(name=name, error=f"битый JSON от модели: {e}")
     if not isinstance(data, dict):
         return AIResult(name=name, error="ответ модели — не JSON-объект")
-    missing = [k for k in REQUIRED_RESULT_FIELDS if k not in data]
+    missing = [k for k in required_fields if k not in data]
     if missing:
         return AIResult(name=name, error=f"в ответе нет полей: {', '.join(missing)}")
     return AIResult(name=name, data=data)
@@ -127,6 +167,7 @@ class OpenAICompatProvider:
         normalize: Callable[[str], str] | None = None,
         timeout: int = 600,
         retries: int = 3,
+        required_fields: tuple[str, ...] | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -136,6 +177,7 @@ class OpenAICompatProvider:
         self.normalize = normalize or (lambda t: t)
         self.timeout = timeout
         self.retries = retries
+        self.required_fields = required_fields or REQUIRED_RESULT_FIELDS
 
     def analyze(
         self,
@@ -161,7 +203,7 @@ class OpenAICompatProvider:
             raw = self._post_with_retries(payload)
         except Exception as e:  # noqa: BLE001 — per-chunk soft fail, summary logged by caller
             return AIResult(name=job.name, error=str(e))
-        return parse_model_json(job.name, raw, self.normalize)
+        return parse_model_json(job.name, raw, self.normalize, required_fields=self.required_fields)
 
     def _post_with_retries(self, payload: dict[str, Any]) -> str:
         url = f"{self.base_url}/chat/completions"
@@ -200,6 +242,7 @@ class AnthropicProvider:
         concurrency: int = 2,
         poll_interval: int = 30,
         client: Any = None,
+        schema: dict[str, Any] | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key
@@ -208,6 +251,7 @@ class AnthropicProvider:
         self.concurrency = max(1, concurrency)
         self.poll_interval = poll_interval
         self.client = client  # tests inject a stub; real client is created lazily
+        self.schema = schema or EVENTS_SCHEMA
 
     def _get_client(self) -> Any:
         if self.client is None:
@@ -231,7 +275,7 @@ class AnthropicProvider:
         return {
             "model": self.model,
             "max_tokens": self.max_output_tokens,
-            "output_config": {"format": {"type": "json_schema", "schema": EVENTS_SCHEMA}},
+            "output_config": {"format": {"type": "json_schema", "schema": self.schema}},
             "messages": [{"role": "user", "content": job.prompt}],
         }
 

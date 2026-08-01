@@ -280,3 +280,51 @@ class TestAnthropicProviderBatch:
         results = p.analyze([], resume_batch_id="batch_old")
         assert client.created_requests is None  # no new batch
         assert results[0].name == "chunk_000"
+
+
+class TestSchemaParameterization:
+    def test_parse_custom_required_fields(self):
+        text = json.dumps({"recap": "r", "quest_hooks": [], "scenes": []})
+        res = ap.parse_model_json("synthesis", text, lambda t: t,
+                                  required_fields=("recap", "quest_hooks", "scenes"))
+        assert res.error is None
+
+    def test_parse_custom_required_fields_missing(self):
+        res = ap.parse_model_json("synthesis", '{"recap": "r"}', lambda t: t,
+                                  required_fields=("recap", "quest_hooks", "scenes"))
+        assert "quest_hooks" in res.error
+
+    def test_anthropic_custom_schema_in_params(self):
+        client = FakeAnthropicClient()
+        p = ap.AnthropicProvider(model="m", api_key="k", mode="direct", concurrency=1,
+                                 client=client, schema=ap.SYNTHESIS_SCHEMA)
+        p.analyze([ap.ChunkJob("synthesis", "p", "h")])
+        assert client.direct_params["output_config"]["format"]["schema"] is ap.SYNTHESIS_SCHEMA
+
+    def test_openai_compat_custom_required_fields(self, monkeypatch):
+        payload = json.dumps({"recap": "r", "quest_hooks": [], "scenes": []})
+        monkeypatch.setattr(ap.urllib.request, "urlopen",
+                            lambda req, timeout=None: _fake_response(payload))
+        p = ap.OpenAICompatProvider(model="m", base_url="http://x/v1", concurrency=1,
+                                    required_fields=("recap", "quest_hooks", "scenes"))
+        results = p.analyze([ap.ChunkJob("synthesis", "p", "h")])
+        assert results[0].error is None
+
+
+class TestSynthesisSchema:
+    def test_structure(self):
+        props = ap.SYNTHESIS_SCHEMA["properties"]
+        assert set(ap.SYNTHESIS_SCHEMA["required"]) == {"recap", "quest_hooks", "scenes"}
+        assert props["scenes"]["items"]["required"] == ["title", "chunk_index", "time", "image_prompt"]
+
+    def test_all_objects_forbid_additional_properties(self):
+        def walk(node):
+            if isinstance(node, dict):
+                if node.get("type") == "object":
+                    assert node.get("additionalProperties") is False
+                for v in node.values():
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+        walk(ap.SYNTHESIS_SCHEMA)
