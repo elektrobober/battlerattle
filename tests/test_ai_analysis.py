@@ -300,3 +300,50 @@ class TestCli:
         rc = dp.main(["ai-analyze", str(tmp_path)])
         assert rc == 0
         assert called["reports"] is False
+
+
+class TestDotenv:
+    def test_parses_basic_file(self, tmp_path, monkeypatch):
+        for k in ("MY_TEST_KEY", "QUOTED", "SINGLE"):
+            monkeypatch.delenv(k, raising=False)
+        (tmp_path / ".env").write_text(
+            "# комментарий\nMY_TEST_KEY=abc123\n\nQUOTED=\"in quotes\"\nSINGLE='single'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(dp.os, "environ", dict(dp.os.environ))
+        dp.load_dotenv_files(tmp_path, repo_dir=tmp_path)
+        assert dp.os.environ.get("MY_TEST_KEY") == "abc123"
+        assert dp.os.environ.get("QUOTED") == "in quotes"
+        assert dp.os.environ.get("SINGLE") == "single"
+
+    def test_does_not_override_existing_env(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dp.os, "environ", dict(dp.os.environ))
+        dp.os.environ["MY_TEST_KEY"] = "from-shell"
+        (tmp_path / ".env").write_text("MY_TEST_KEY=from-file\n", encoding="utf-8")
+        dp.load_dotenv_files(tmp_path, repo_dir=tmp_path)
+        assert dp.os.environ["MY_TEST_KEY"] == "from-shell"
+
+    def test_session_env_wins_over_repo_env(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dp.os, "environ", dict(dp.os.environ))
+        dp.os.environ.pop("MY_TEST_KEY", None)
+        session = tmp_path / "session"
+        repo = tmp_path / "repo"
+        session.mkdir()
+        repo.mkdir()
+        (session / ".env").write_text("MY_TEST_KEY=session\n", encoding="utf-8")
+        (repo / ".env").write_text("MY_TEST_KEY=repo\n", encoding="utf-8")
+        dp.load_dotenv_files(session, repo_dir=repo)
+        assert dp.os.environ["MY_TEST_KEY"] == "session"
+
+    def test_missing_files_no_error(self, tmp_path):
+        dp.load_dotenv_files(tmp_path, repo_dir=tmp_path)  # нет .env — тихо
+
+    def test_load_cfg_loads_session_dotenv(self, tmp_path, monkeypatch):
+        import argparse
+        monkeypatch.setattr(dp.os, "environ", dict(dp.os.environ))
+        dp.os.environ.pop("DOTENV_WIRED", None)
+        dp.write_json(tmp_path / "config.json", {"session_name": "test"})
+        (tmp_path / ".env").write_text("DOTENV_WIRED=yes\n", encoding="utf-8")
+        args = argparse.Namespace(session_dir=str(tmp_path), config=None)
+        dp.load_cfg(args)
+        assert dp.os.environ.get("DOTENV_WIRED") == "yes"

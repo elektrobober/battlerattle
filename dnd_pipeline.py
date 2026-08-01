@@ -248,6 +248,28 @@ def resolve_ai_config(cfg: dict[str, Any]) -> dict[str, Any]:
     return ai
 
 
+def load_dotenv_files(session_dir: Path, repo_dir: Path | None = None) -> None:
+    """Load KEY=value pairs from .env into os.environ (existing vars win).
+
+    Order: session .env, then repo-root .env — так сессионный файл главнее
+    общего, а уже экспортированные переменные главнее обоих.
+    """
+    if repo_dir is None:
+        repo_dir = Path(__file__).parent
+    for env_file in (session_dir / ".env", repo_dir / ".env"):
+        if not env_file.is_file():
+            continue
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip("'\"")
+            if key:
+                os.environ.setdefault(key, value)
+
+
 def resolve_ai_api_key(ai: dict[str, Any]) -> str | None:
     env_name = ai.get("api_key_env") or ("ANTHROPIC_API_KEY" if ai["provider"] == "anthropic" else None)
     return os.environ.get(env_name) if env_name else None
@@ -1999,6 +2021,7 @@ def build_reports(paths: Paths, cfg: dict[str, Any]) -> None:
 
 def load_cfg(args: argparse.Namespace) -> tuple[Path, dict[str, Any], Paths]:
     session_dir = Path(args.session_dir).expanduser().resolve()
+    load_dotenv_files(session_dir)
     config_path = Path(args.config).expanduser().resolve() if args.config else session_dir / "config.json"
     cfg = load_json(config_path)
     if "session_name" not in cfg:
