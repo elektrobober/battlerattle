@@ -1694,6 +1694,51 @@ def run_session_synthesis(
     return result.data
 
 
+# ──────────────────────────────────────────────────────────────
+# PDF chronicle: config and assets
+# ──────────────────────────────────────────────────────────────
+
+PDF_DEFAULTS: dict[str, Any] = {
+    "enabled": True,
+    "assets_dir": None,
+    "campaign_title": "Хроники кампании",
+    "subtitle": "D&D · Forgotten Realms",
+}
+
+
+def resolve_pdf_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    return deep_merge(PDF_DEFAULTS, cfg.get("pdf") or {})
+
+
+def pdf_assets_dir(session_dir: Path, pdf_cfg: dict[str, Any]) -> Path:
+    if pdf_cfg.get("assets_dir"):
+        return Path(pdf_cfg["assets_dir"]).expanduser().resolve()
+    return session_dir / "report_assets"
+
+
+def load_party(assets_dir: Path) -> list[dict[str, Any]]:
+    p = assets_dir / "party.json"
+    if not p.exists():
+        return []
+    try:
+        raw = load_json(p)
+    except ValueError as e:
+        logger.warning(f"Битый party.json: {e}")
+        return []
+    return [m for m in raw if isinstance(m, dict) and m.get("name")]
+
+
+def find_scene_images(assets_dir: Path) -> dict[int, Path]:
+    scenes: dict[int, Path] = {}
+    if not assets_dir.exists():
+        return scenes
+    for p in sorted(assets_dir.iterdir()):
+        m = re.match(r"scene(\d+)", p.name)
+        if m and p.suffix.lower() in (".png", ".jpg", ".jpeg"):
+            scenes.setdefault(int(m.group(1)), p)
+    return scenes
+
+
 def compute_report_data(results: list[dict[str, Any]], cfg: dict[str, Any]) -> dict[str, Any]:
     """Общие расчёты для markdown-отчётов и PDF-хроники."""
     actions: list[dict[str, Any]] = []

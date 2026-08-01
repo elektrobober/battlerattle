@@ -160,3 +160,37 @@ class TestRunSessionSynthesis:
         paths = _session_with_results(tmp_path, monkeypatch, provider)
         cfg = {"session_name": "test", "ai": {"enabled": True}}
         assert dp.run_session_synthesis(cfg, paths, []) is None
+
+
+class TestPdfAssets:
+    def test_resolve_pdf_config_defaults(self):
+        pdf = dp.resolve_pdf_config({})
+        assert pdf["enabled"] is True
+        assert pdf["campaign_title"] == "Хроники кампании"
+
+    def test_assets_dir_default_and_override(self, tmp_path):
+        assert dp.pdf_assets_dir(tmp_path, dp.resolve_pdf_config({})) == tmp_path / "report_assets"
+        custom = tmp_path / "campaign_assets"
+        pdf = dp.resolve_pdf_config({"pdf": {"assets_dir": str(custom)}})
+        assert dp.pdf_assets_dir(tmp_path, pdf) == custom
+
+    def test_load_party_missing_returns_empty(self, tmp_path):
+        assert dp.load_party(tmp_path) == []
+
+    def test_load_party_reads_and_filters(self, tmp_path):
+        dp.write_json(tmp_path / "party.json", [
+            {"name": "Ангрон", "class_ru": "Воин", "player": "Дима", "ref": "ref.jpg"},
+            {"class_ru": "без имени — отбрасываем"},
+        ])
+        party = dp.load_party(tmp_path)
+        assert len(party) == 1
+        assert party[0]["name"] == "Ангрон"
+
+    def test_find_scene_images(self, tmp_path):
+        (tmp_path / "scene1_tavern.png").write_bytes(b"x")
+        (tmp_path / "scene3.jpg").write_bytes(b"x")
+        (tmp_path / "ref.1 Гай.jpg").write_bytes(b"x")
+        (tmp_path / "scene_bad.png").write_bytes(b"x")
+        scenes = dp.find_scene_images(tmp_path)
+        assert sorted(scenes) == [1, 3]
+        assert scenes[1].name == "scene1_tavern.png"
