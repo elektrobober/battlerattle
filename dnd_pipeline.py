@@ -1442,6 +1442,113 @@ def build_ai_jobs(
     return jobs, skipped
 
 
+def make_ai_provider(ai: dict[str, Any], api_key: str | None) -> Any:
+    if ai["provider"] == "anthropic":
+        from ai_providers import AnthropicProvider
+
+        return AnthropicProvider(
+            model=ai["model"],
+            api_key=api_key,
+            mode=ai["mode"],
+            max_output_tokens=ai["max_output_tokens"],
+            concurrency=ai["concurrency"],
+        )
+    from ai_providers import OpenAICompatProvider
+
+    return OpenAICompatProvider(
+        model=ai["model"],
+        base_url=ai["base_url"],
+        api_key=api_key,
+        max_output_tokens=ai["max_output_tokens"],
+        concurrency=ai["concurrency"],
+        normalize=normalize_json_text,
+    )
+
+
+def run_ai_analysis(
+    chunk_paths: list[Path], cfg: dict[str, Any], paths: Paths, force: bool = False
+) -> bool:
+    """Run chunks through the configured LLM provider. Returns False → manual mode."""
+    ai = resolve_ai_config(cfg)
+    if not ai["enabled"]:
+        logger.info("AI-этап выключен (ai.enabled=false) — ручной режим.")
+        return False
+    api_key = resolve_ai_api_key(ai)
+    if ai["provider"] == "anthropic" and not api_key:
+        env_name = ai.get("api_key_env") or "ANTHROPIC_API_KEY"
+        logger.warning(f"Нет API-ключа: переменная {env_name} пуста. Падаю в ручной режим.")
+        return False
+
+    state = load_ai_state(paths)
+    pending = state.get("pending_batch")
+    resume_batch_id = None
+    if pending and pending.get("provider") == ai["provider"] and pending.get("model") == ai["model"]:
+        resume_batch_id = pending["batch_id"]
+        logger.info(f"Продолжаю незавершённый batch: {resume_batch_id}")
+
+    jobs, skipped = build_ai_jobs(chunk_paths, paths, state, force)
+    if skipped:
+        logger.info(f"AI: пропущено {skipped} чанков — результаты уже есть")
+    if not jobs and not resume_batch_id:
+        logger.info("AI: все чанки уже посчитаны.")
+        return True
+
+    hash_by_name = {j.name: j.chunk_hash for j in jobs}
+    if resume_batch_id and pending:
+        hash_by_name.update(pending.get("jobs", {}))
+
+    total = len(jobs) if jobs else len(hash_by_name)
+    progress = {"n": 0}
+
+    def on_result(res: Any) -> None:
+        progress["n"] += 1
+        if res.data is not None:
+            write_json(paths.manual_ai_dir / f"{res.name}_events.json", res.data)
+            state["chunks"][res.name] = {
+                "chunk_hash": hash_by_name.get(res.name, ""),
+                "model": ai["model"],
+                "provider": ai["provider"],
+                "status": "done",
+            }
+            save_ai_state(paths, state)
+            logger.info(f"AI [{progress['n']}/{total}]: {res.name} готов")
+        else:
+            logger.warning(f"AI [{progress['n']}/{total}]: {res.name} ошибка: {res.error}")
+
+    provider = make_ai_provider(ai, api_key)
+    logger.info(f"AI-анализ: provider={ai['provider']}, model={ai['model']}, чанков в работе: {len(jobs)}")
+
+    if ai["provider"] == "anthropic" and ai["mode"] == "batch":
+        def on_batch_created(batch_id: str) -> None:
+            state["pending_batch"] = {
+                "batch_id": batch_id,
+                "provider": ai["provider"],
+                "model": ai["model"],
+                "jobs": hash_by_name,
+            }
+            save_ai_state(paths, state)
+
+        results = provider.analyze(
+            jobs,
+            on_result=on_result,
+            resume_batch_id=resume_batch_id,
+            on_batch_created=on_batch_created,
+        )
+        state["pending_batch"] = None
+        save_ai_state(paths, state)
+    else:
+        results = provider.analyze(jobs, on_result=on_result)
+
+    failed = [r for r in results if r.data is None]
+    if failed:
+        names = ", ".join(r.name for r in failed)
+        logger.warning(
+            f"AI: {len(failed)} чанков без результата: {names}. "
+            f"Добить: python dnd_pipeline.py ai-analyze <session_dir>"
+        )
+    return True
+
+
 def build_reports(paths: Paths, cfg: dict[str, Any]) -> None:
     results = read_manual_results(paths)
     paths.reports_dir.mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,10 @@
 """Tests for the API-driven AI analysis stage in dnd_pipeline."""
+from types import SimpleNamespace
+
 import pytest
 
 import dnd_pipeline as dp
+from ai_providers import AIResult
 
 
 class TestResolveAiConfig:
@@ -122,3 +125,112 @@ class TestBuildAiJobs:
         state = {"chunks": {"chunk_000": {"chunk_hash": h}}}
         jobs, skipped = dp.build_ai_jobs(chunk_paths, paths, state, force=True)
         assert [j.name for j in jobs] == ["chunk_000"]
+
+
+class FakeProvider:
+    def __init__(self, results, expect_resume=None):
+        self.results = results
+        self.expect_resume = expect_resume
+        self.seen_jobs = None
+        self.got_resume = "NOT_CALLED"
+
+    def analyze(self, jobs, on_result=None, resume_batch_id=None, on_batch_created=None):
+        self.seen_jobs = jobs
+        self.got_resume = resume_batch_id
+        if on_batch_created:
+            on_batch_created("batch_new")
+        for r in self.results:
+            if on_result:
+                on_result(r)
+        return self.results
+
+
+def _ai_cfg(**kw):
+    ai = {"enabled": True}
+    ai.update(kw)
+    return {"session_name": "test", "ai": ai}
+
+
+class TestRunAiAnalysis:
+    def test_disabled_returns_false(self, tmp_path):
+        paths, chunk_paths = _make_session(tmp_path, [{"a": 1}])
+        assert dp.run_ai_analysis(chunk_paths, {"session_name": "test"}, paths) is False
+
+    def test_no_key_returns_false(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        paths, chunk_paths = _make_session(tmp_path, [{"a": 1}])
+        assert dp.run_ai_analysis(chunk_paths, _ai_cfg(), paths) is False
+
+    def test_writes_results_and_state(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        paths, chunk_paths = _make_session(tmp_path, [{"a": 1}])
+        fake = FakeProvider([AIResult(name="chunk_000", data={"summary": "ok"})])
+        monkeypatch.setattr(dp, "make_ai_provider", lambda ai, key: fake)
+        assert dp.run_ai_analysis(chunk_paths, _ai_cfg(mode="direct"), paths) is True
+        written = dp.load_json(paths.manual_ai_dir / "chunk_000_events.json")
+        assert written == {"summary": "ok"}
+        state = dp.load_ai_state(paths)
+        assert state["chunks"]["chunk_000"]["chunk_hash"] == dp.stable_hash({"a": 1})
+        assert state["pending_batch"] is None
+
+    def test_batch_mode_saves_and_clears_pending(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        paths, chunk_paths = _make_session(tmp_path, [{"a": 1}])
+        pending_snapshots = []
+        fake = FakeProvider([AIResult(name="chunk_000", data={"summary": "ok"})])
+
+        orig_save = dp.save_ai_state
+
+        def spy_save(p, state):
+            pending_snapshots.append(state.get("pending_batch"))
+            orig_save(p, state)
+
+        monkeypatch.setattr(dp, "save_ai_state", spy_save)
+        monkeypatch.setattr(dp, "make_ai_provider", lambda ai, key: fake)
+        dp.run_ai_analysis(chunk_paths, _ai_cfg(mode="batch"), paths)
+        # first save: pending batch recorded; final save: cleared
+        assert any(p and p["batch_id"] == "batch_new" for p in pending_snapshots)
+        assert dp.load_ai_state(paths)["pending_batch"] is None
+
+    def test_resume_pending_batch(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        paths, chunk_paths = _make_session(tmp_path, [{"a": 1}])
+        # chunk_000 already has a result; pending batch exists for it
+        dp.save_ai_state(paths, {
+            "chunks": {},
+            "pending_batch": {"batch_id": "batch_old", "provider": "anthropic",
+                              "model": "claude-sonnet-5", "jobs": {"chunk_000": "h"}},
+        })
+        fake = FakeProvider([AIResult(name="chunk_000", data={"summary": "ok"})])
+        monkeypatch.setattr(dp, "make_ai_provider", lambda ai, key: fake)
+        dp.run_ai_analysis(chunk_paths, _ai_cfg(mode="batch"), paths)
+        assert fake.got_resume == "batch_old"
+
+    def test_failed_chunks_do_not_write_files(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        paths, chunk_paths = _make_session(tmp_path, [{"a": 1}, {"a": 2}])
+        fake = FakeProvider([
+            AIResult(name="chunk_000", data={"summary": "ok"}),
+            AIResult(name="chunk_001", error="boom"),
+        ])
+        monkeypatch.setattr(dp, "make_ai_provider", lambda ai, key: fake)
+        dp.run_ai_analysis(chunk_paths, _ai_cfg(mode="direct"), paths)
+        assert (paths.manual_ai_dir / "chunk_000_events.json").exists()
+        assert not (paths.manual_ai_dir / "chunk_001_events.json").exists()
+
+
+class TestMakeAiProvider:
+    def test_openai_compatible(self):
+        ai = dp.resolve_ai_config(
+            {"ai": {"provider": "openai_compatible", "base_url": "http://x/v1", "model": "llama3.1"}}
+        )
+        p = dp.make_ai_provider(ai, None)
+        assert type(p).__name__ == "OpenAICompatProvider"
+        assert p.model == "llama3.1"
+        assert p.normalize is dp.normalize_json_text
+
+    def test_anthropic(self):
+        ai = dp.resolve_ai_config({"ai": {}})
+        p = dp.make_ai_provider(ai, "sk-test")
+        assert type(p).__name__ == "AnthropicProvider"
+        assert p.mode == "batch"
