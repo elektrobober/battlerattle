@@ -153,3 +153,108 @@ class TestOpenAICompatProvider:
         seen = []
         self._provider().analyze([ap.ChunkJob("chunk_000", "p", "h")], on_result=seen.append)
         assert [r.name for r in seen] == ["chunk_000"]
+
+
+from types import SimpleNamespace
+
+
+def _fake_message(text=None, stop_reason="end_turn"):
+    content = [SimpleNamespace(type="text", text=text if text is not None else _ok_content())]
+    return SimpleNamespace(stop_reason=stop_reason, content=content)
+
+
+class FakeAnthropicClient:
+    """Stub matching the slice of the anthropic SDK we use."""
+
+    def __init__(self, batch_results=None, direct_message=None):
+        self.created_requests = None
+        self.retrieve_calls = 0
+
+        outer = self
+
+        class Batches:
+            def create(self, requests):
+                outer.created_requests = requests
+                return SimpleNamespace(id="batch_123")
+
+            def retrieve(self, batch_id):
+                outer.retrieve_calls += 1
+                status = "in_progress" if outer.retrieve_calls == 1 else "ended"
+                return SimpleNamespace(
+                    processing_status=status,
+                    request_counts=SimpleNamespace(processing=1),
+                )
+
+            def results(self, batch_id):
+                return iter(batch_results or [])
+
+        class Messages:
+            def __init__(self):
+                self.batches = Batches()
+
+            def create(self, **params):
+                outer.direct_params = params
+                return direct_message or _fake_message()
+
+        self.messages = Messages()
+
+
+def _batch_item(custom_id, result_type="succeeded", message=None):
+    if result_type == "succeeded":
+        result = SimpleNamespace(type="succeeded", message=message or _fake_message())
+    else:
+        result = SimpleNamespace(type=result_type)
+    return SimpleNamespace(custom_id=custom_id, result=result)
+
+
+class TestAnthropicProviderDirect:
+    def test_direct_success_and_params(self):
+        client = FakeAnthropicClient()
+        p = ap.AnthropicProvider(model="claude-sonnet-5", api_key="k", mode="direct",
+                                 concurrency=1, client=client)
+        results = p.analyze([ap.ChunkJob("chunk_000", "PROMPT", "h")])
+        assert results[0].data["summary"] == "ok"
+        params = client.direct_params
+        assert params["model"] == "claude-sonnet-5"
+        assert params["output_config"]["format"]["type"] == "json_schema"
+        assert params["messages"][0]["content"] == "PROMPT"
+
+    def test_refusal_is_error(self):
+        client = FakeAnthropicClient(direct_message=_fake_message(stop_reason="refusal"))
+        p = ap.AnthropicProvider(model="m", api_key="k", mode="direct", concurrency=1, client=client)
+        results = p.analyze([ap.ChunkJob("chunk_000", "p", "h")])
+        assert results[0].data is None
+        assert "refusal" in results[0].error
+
+    def test_max_tokens_truncation_is_error(self):
+        client = FakeAnthropicClient(direct_message=_fake_message(stop_reason="max_tokens"))
+        p = ap.AnthropicProvider(model="m", api_key="k", mode="direct", concurrency=1, client=client)
+        results = p.analyze([ap.ChunkJob("chunk_000", "p", "h")])
+        assert results[0].data is None
+        assert "max_tokens" in results[0].error
+
+
+class TestAnthropicProviderBatch:
+    def test_batch_flow(self, monkeypatch):
+        monkeypatch.setattr(ap.time, "sleep", lambda s: None)
+        items = [_batch_item("chunk_000"), _batch_item("chunk_001", result_type="errored")]
+        client = FakeAnthropicClient(batch_results=items)
+        p = ap.AnthropicProvider(model="m", api_key="k", mode="batch", client=client)
+        created = []
+        results = p.analyze(
+            [ap.ChunkJob("chunk_000", "p0", "h0"), ap.ChunkJob("chunk_001", "p1", "h1")],
+            on_batch_created=created.append,
+        )
+        assert created == ["batch_123"]
+        assert [r["custom_id"] for r in client.created_requests] == ["chunk_000", "chunk_001"]
+        by_name = {r.name: r for r in results}
+        assert by_name["chunk_000"].data is not None
+        assert by_name["chunk_001"].error == "batch result: errored"
+
+    def test_resume_skips_create(self, monkeypatch):
+        monkeypatch.setattr(ap.time, "sleep", lambda s: None)
+        client = FakeAnthropicClient(batch_results=[_batch_item("chunk_000")])
+        p = ap.AnthropicProvider(model="m", api_key="k", mode="batch", client=client)
+        results = p.analyze([], resume_batch_id="batch_old")
+        assert client.created_requests is None  # no new batch
+        assert results[0].name == "chunk_000"

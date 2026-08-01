@@ -186,3 +186,116 @@ class OpenAICompatProvider:
                 last_err = e
                 time.sleep(2 ** attempt)
         raise RuntimeError(f"API не ответил после {self.retries} попыток: {last_err}")
+
+
+class AnthropicProvider:
+    """Anthropic Messages API: Batch mode (default, -50% cost) or direct requests."""
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        mode: str = "batch",
+        max_output_tokens: int = 8000,
+        concurrency: int = 2,
+        poll_interval: int = 30,
+        client: Any = None,
+    ) -> None:
+        self.model = model
+        self.api_key = api_key
+        self.mode = mode
+        self.max_output_tokens = max_output_tokens
+        self.concurrency = max(1, concurrency)
+        self.poll_interval = poll_interval
+        self.client = client  # tests inject a stub; real client is created lazily
+
+    def _get_client(self) -> Any:
+        if self.client is None:
+            import anthropic  # lazy: openai_compatible works without the package
+
+            self.client = anthropic.Anthropic(api_key=self.api_key)
+        return self.client
+
+    def analyze(
+        self,
+        jobs: list[ChunkJob],
+        on_result: Callable[[AIResult], None] | None = None,
+        resume_batch_id: str | None = None,
+        on_batch_created: Callable[[str], None] | None = None,
+    ) -> list[AIResult]:
+        if self.mode == "batch":
+            return self._analyze_batch(jobs, on_result, resume_batch_id, on_batch_created)
+        return self._analyze_direct(jobs, on_result)
+
+    def _request_params(self, job: ChunkJob) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "max_tokens": self.max_output_tokens,
+            "output_config": {"format": {"type": "json_schema", "schema": EVENTS_SCHEMA}},
+            "messages": [{"role": "user", "content": job.prompt}],
+        }
+
+    def _result_from_message(self, name: str, msg: Any) -> AIResult:
+        if msg.stop_reason == "refusal":
+            return AIResult(name=name, error="модель отказалась отвечать (refusal)")
+        if msg.stop_reason == "max_tokens":
+            return AIResult(name=name, error="ответ обрезан (max_tokens); подними ai.max_output_tokens")
+        text = next((b.text for b in msg.content if b.type == "text"), "")
+        try:
+            return AIResult(name=name, data=json.loads(text))
+        except ValueError as e:
+            return AIResult(name=name, error=f"битый JSON: {e}")
+
+    # ── direct ──
+    def _analyze_direct(
+        self, jobs: list[ChunkJob], on_result: Callable[[AIResult], None] | None
+    ) -> list[AIResult]:
+        results: list[AIResult] = []
+        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+            for res in pool.map(self._analyze_one_direct, jobs):
+                if on_result:
+                    on_result(res)
+                results.append(res)
+        return results
+
+    def _analyze_one_direct(self, job: ChunkJob) -> AIResult:
+        try:
+            msg = self._get_client().messages.create(**self._request_params(job))
+        except Exception as e:  # noqa: BLE001 — per-chunk soft fail, summary logged by caller
+            return AIResult(name=job.name, error=str(e))
+        return self._result_from_message(job.name, msg)
+
+    # ── batch ──
+    def _analyze_batch(
+        self,
+        jobs: list[ChunkJob],
+        on_result: Callable[[AIResult], None] | None,
+        resume_batch_id: str | None,
+        on_batch_created: Callable[[str], None] | None,
+    ) -> list[AIResult]:
+        client = self._get_client()
+        batch_id = resume_batch_id
+        if batch_id is None:
+            batch = client.messages.batches.create(
+                requests=[{"custom_id": j.name, "params": self._request_params(j)} for j in jobs]
+            )
+            batch_id = batch.id
+            if on_batch_created:
+                on_batch_created(batch_id)
+            logger.info(f"Batch создан: {batch_id} ({len(jobs)} чанков). Обычно готов в течение часа.")
+        while True:
+            status = client.messages.batches.retrieve(batch_id)
+            if status.processing_status == "ended":
+                break
+            logger.info(f"Batch {batch_id}: ждём, в обработке {status.request_counts.processing}…")
+            time.sleep(self.poll_interval)
+        results: list[AIResult] = []
+        for item in client.messages.batches.results(batch_id):
+            if item.result.type == "succeeded":
+                res = self._result_from_message(item.custom_id, item.result.message)
+            else:
+                res = AIResult(name=item.custom_id, error=f"batch result: {item.result.type}")
+            if on_result:
+                on_result(res)
+            results.append(res)
+        return results
