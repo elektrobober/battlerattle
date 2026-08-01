@@ -1540,10 +1540,15 @@ def run_ai_analysis(
         state["pending_batch"] = None
         save_ai_state(paths, state)
         if resume_batch_id and jobs:
-            logger.warning(
-                f"AI: {len(jobs)} чанков не входили в возобновлённый batch и остались без результата: "
-                f"{', '.join(j.name for j in jobs)}. Запусти ai-analyze ещё раз."
-            )
+            # Возобновлённый batch отдаёт результаты только своих чанков; из
+            # свежесобранных jobs предупреждаем лишь о тех, кто остался ни с чем.
+            done_names = {r.name for r in results if r.data is not None}
+            leftover = [j.name for j in jobs if j.name not in done_names]
+            if leftover:
+                logger.warning(
+                    f"AI: {len(leftover)} чанков не входили в возобновлённый batch и остались без результата: "
+                    f"{', '.join(leftover)}. Запусти ai-analyze ещё раз."
+                )
     else:
         results = provider.analyze(jobs, on_result=on_result)
 

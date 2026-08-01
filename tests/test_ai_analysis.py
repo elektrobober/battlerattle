@@ -229,6 +229,10 @@ class TestRunAiAnalysis:
         assert not (paths.manual_ai_dir / "chunk_001_events.json").exists()
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert any("chunk_001" in r.message for r in warnings)
+        # chunk_000 got its result from the resumed batch — it must NOT be
+        # listed as "left without result".
+        assert not any("chunk_000" in r.message for r in warnings)
+        assert any("1 чанков" in r.message for r in warnings)
         # progress counter should reflect the pending batch's job count (1),
         # not the freshly-built jobs list (2) — no "[N/2]" style logs.
         assert any("чанков в работе: 1" in m for m in messages)
