@@ -39,3 +39,4 @@ _dnd_pipeline_out/
 .env
 .env.*
 !.env.example
+sessions_inbox/
