@@ -219,7 +219,19 @@ class OpenAICompatProvider:
                     data = json.loads(resp.read().decode("utf-8"))
                 return data["choices"][0]["message"]["content"]
             except urllib.error.HTTPError as e:
-                if e.code == 429 or e.code >= 500:
+                if e.code == 429:
+                    # Rate limit: у OpenAI/провайдеров TPM-окно минутное,
+                    # секундные ретраи бесполезны — ждём Retry-After или 25с.
+                    last_err = e
+                    try:
+                        retry_after = int((e.headers or {}).get("Retry-After", 0))
+                    except (ValueError, TypeError):
+                        retry_after = 0
+                    delay = retry_after if retry_after > 0 else 25
+                    logger.info(f"Rate limit (429), жду {delay}с и повторяю…")
+                    time.sleep(delay)
+                    continue
+                if e.code >= 500:
                     last_err = e
                     time.sleep(2 ** attempt)
                     continue

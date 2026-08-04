@@ -328,3 +328,56 @@ class TestSynthesisSchema:
                 for v in node:
                     walk(v)
         walk(ap.SYNTHESIS_SCHEMA)
+
+
+class TestRateLimitBackoff:
+    def test_429_honors_retry_after_header(self, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr(ap.time, "sleep", sleeps.append)
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise urllib.error.HTTPError(req.full_url, 429, "rate limited",
+                                             {"Retry-After": "17"}, io.BytesIO(b""))
+            return _fake_response(_ok_content())
+
+        monkeypatch.setattr(ap.urllib.request, "urlopen", fake_urlopen)
+        p = ap.OpenAICompatProvider(model="m", base_url="http://x/v1", concurrency=1)
+        results = p.analyze([ap.ChunkJob("chunk_000", "p", "h")])
+        assert results[0].error is None
+        assert sleeps[0] == 17
+
+    def test_429_without_header_waits_long_not_seconds(self, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr(ap.time, "sleep", sleeps.append)
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise urllib.error.HTTPError(req.full_url, 429, "rate limited",
+                                             {}, io.BytesIO(b""))
+            return _fake_response(_ok_content())
+
+        monkeypatch.setattr(ap.urllib.request, "urlopen", fake_urlopen)
+        p = ap.OpenAICompatProvider(model="m", base_url="http://x/v1", concurrency=1)
+        p.analyze([ap.ChunkJob("chunk_000", "p", "h")])
+        assert sleeps[0] >= 20  # минутное TPM-окно, секундные ретраи бесполезны
+
+    def test_500_keeps_fast_exponential_backoff(self, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr(ap.time, "sleep", sleeps.append)
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, io.BytesIO(b""))
+            return _fake_response(_ok_content())
+
+        monkeypatch.setattr(ap.urllib.request, "urlopen", fake_urlopen)
+        p = ap.OpenAICompatProvider(model="m", base_url="http://x/v1", concurrency=1)
+        p.analyze([ap.ChunkJob("chunk_000", "p", "h")])
+        assert sleeps[0] == 1
