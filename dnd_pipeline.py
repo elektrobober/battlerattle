@@ -1346,8 +1346,36 @@ def make_chunks(rows: list[dict[str, Any]], cfg: dict[str, Any], paths: Paths) -
     return out_paths
 
 
-def prompt_for_chunk(chunk_json: dict[str, Any]) -> str:
+def party_context_block(party: list[dict[str, Any]]) -> str:
+    """Блок «Партия» для промптов: классы, заклинания, особенности.
+
+    Прайор для атрибуции: в шумных местах разметка спикеров врёт, а список
+    заклинаний почти однозначно указывает на кастера.
+    """
+    if not party:
+        return ""
+    lines = ["Партия (используй для атрибуции действий и заклинаний):"]
+    for m in party:
+        line = m["name"]
+        if m.get("class_ru"):
+            line += f" — {m['class_ru']}"
+        if m.get("spells"):
+            line += f". Заклинания/способности: {', '.join(m['spells'])}"
+        if m.get("notes_ru"):
+            line += f". Особенности: {m['notes_ru']}"
+        lines.append(f"- {line}")
+    lines.append(
+        "Заклинание может кастовать только тот, у кого оно есть в списке. "
+        "Если разметка спикера противоречит спискам заклинаний партии — доверяй "
+        "спискам, указывай владельца заклинания и ставь confidence low."
+    )
+    return "\n".join(lines)
+
+
+def prompt_for_chunk(chunk_json: dict[str, Any], party: list[dict[str, Any]] | None = None) -> str:
     data = json.dumps(chunk_json, ensure_ascii=False, indent=2)
+    party_block = party_context_block(party or [])
+    party_section = f"\n{party_block}\n" if party_block else ""
     return f"""# Ручной AI-анализ D&D-сессии
 
 Ты анализируешь фрагмент D&D-сессии. Верни СТРОГО JSON без markdown-блока.
@@ -1383,20 +1411,20 @@ def prompt_for_chunk(chunk_json: dict[str, Any]) -> str:
 - Если scene_type = setup, техническую настройку микрофонов, громкости, наушников и флуд не считай важными действиями персонажей. Максимум importance=low, кроме явного запуска игры/рекапа.
 - Если scene_type = recap, отличай факты прошлой сессии от действий текущей сессии. В actions пиши как recap/remembered action, а MVP-сигналы давай только за полезное структурирование или важные уточнения.
 - Смешные шутки включай в MVP только если они реально яркие для чанка; вес 1, не больше.
-
+{party_section}
 Вот фрагмент:
 
 {data}
 """
 
 
-def make_prompts(chunk_paths: list[Path], paths: Paths) -> None:
+def make_prompts(chunk_paths: list[Path], paths: Paths, party: list[dict[str, Any]] | None = None) -> None:
     for old in paths.prompts_dir.glob("chunk_*_prompt.md"):
         old.unlink()
 
     for p in chunk_paths:
         chunk = load_json(p)
-        prompt = prompt_for_chunk(chunk)
+        prompt = prompt_for_chunk(chunk, party)
         out = paths.prompts_dir / f"{p.stem}_prompt.md"
         out.write_text(prompt, encoding="utf-8")
     logger.info(f"Промпты созданы: {paths.prompts_dir}")
@@ -1443,16 +1471,23 @@ def save_ai_state(paths: Paths, state: dict[str, Any]) -> None:
 
 
 def build_ai_jobs(
-    chunk_paths: list[Path], paths: Paths, state: dict[str, Any], force: bool
+    chunk_paths: list[Path],
+    paths: Paths,
+    state: dict[str, Any],
+    force: bool,
+    party: list[dict[str, Any]] | None = None,
 ) -> tuple[list[Any], int]:
     from ai_providers import ChunkJob
 
+    party = party or []
+    party_block = party_context_block(party)
     jobs: list[Any] = []
     skipped = 0
     for p in sorted(chunk_paths):
         name = p.stem
         chunk = load_json(p)
-        h = stable_hash(chunk)
+        # Без партии хэш совпадает со старой формулой — кэш прежних сессий жив.
+        h = stable_hash({"chunk": chunk, "party": party_block}) if party_block else stable_hash(chunk)
         out = paths.manual_ai_dir / f"{name}_events.json"
         if out.exists() and not force:
             entry = state.get("chunks", {}).get(name)
@@ -1460,7 +1495,7 @@ def build_ai_jobs(
             if entry is None or entry.get("chunk_hash") == h:
                 skipped += 1
                 continue
-        jobs.append(ChunkJob(name=name, prompt=prompt_for_chunk(chunk), chunk_hash=h))
+        jobs.append(ChunkJob(name=name, prompt=prompt_for_chunk(chunk, party), chunk_hash=h))
     return jobs, skipped
 
 
@@ -1488,7 +1523,11 @@ def make_ai_provider(ai: dict[str, Any], api_key: str | None) -> Any:
 
 
 def run_ai_analysis(
-    chunk_paths: list[Path], cfg: dict[str, Any], paths: Paths, force: bool = False
+    chunk_paths: list[Path],
+    cfg: dict[str, Any],
+    paths: Paths,
+    force: bool = False,
+    party: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Run chunks through the configured LLM provider. Returns False → manual mode."""
     ai = resolve_ai_config(cfg)
@@ -1508,7 +1547,7 @@ def run_ai_analysis(
         resume_batch_id = pending["batch_id"]
         logger.info(f"Продолжаю незавершённый batch: {resume_batch_id}")
 
-    jobs, skipped = build_ai_jobs(chunk_paths, paths, state, force)
+    jobs, skipped = build_ai_jobs(chunk_paths, paths, state, force, party=party)
     if skipped:
         logger.info(f"AI: пропущено {skipped} чанков — результаты уже есть")
     if not jobs and not resume_batch_id:
@@ -1603,7 +1642,11 @@ def build_synthesis_input(results: list[dict[str, Any]], cfg: dict[str, Any]) ->
 
 def synthesis_prompt(payload: dict[str, Any], party: list[dict[str, Any]]) -> str:
     party_desc = "\n".join(
-        f"- {p.get('name')}: {p.get('appearance_en', '')}" for p in party
+        f"- {p.get('name')}"
+        + (f" ({p['class_ru']})" if p.get('class_ru') else "")
+        + (f": {p.get('appearance_en', '')}" if p.get('appearance_en') else "")
+        + (f". Заклинания: {', '.join(p['spells'])}" if p.get('spells') else "")
+        for p in party
     ) or "(нет описаний)"
     data = json.dumps(payload, ensure_ascii=False, indent=2)
     return f"""# Синтез D&D-сессии для иллюстрированной хроники
@@ -2056,8 +2099,9 @@ def cmd_run(args: argparse.Namespace) -> None:
     write_clean_outputs(clean, cfg, paths)
     write_quality_report(raw, clean, cfg, paths)
     chunk_paths = make_chunks(clean, cfg, paths)
-    make_prompts(chunk_paths, paths)
-    if run_ai_analysis(chunk_paths, cfg, paths):
+    party = load_party(pdf_assets_dir(session_dir, resolve_pdf_config(cfg)))
+    make_prompts(chunk_paths, paths, party)
+    if run_ai_analysis(chunk_paths, cfg, paths, party=party):
         build_reports(paths, cfg)
         try:
             build_pdf_pipeline(session_dir, cfg, paths)
@@ -2110,7 +2154,8 @@ def cmd_prepare_ai(args: argparse.Namespace) -> None:
     if not rows:
         raise RuntimeError(f"Не найден clean JSONL: {clean_path}")
     chunk_paths = make_chunks(rows, cfg, paths)
-    make_prompts(chunk_paths, paths)
+    party = load_party(pdf_assets_dir(session_dir, resolve_pdf_config(cfg)))
+    make_prompts(chunk_paths, paths, party)
 
 
 def cmd_ai_analyze(args: argparse.Namespace) -> None:
@@ -2120,7 +2165,8 @@ def cmd_ai_analyze(args: argparse.Namespace) -> None:
         raise RuntimeError(
             f"Нет чанков в {paths.chunks_dir}. Сначала: python dnd_pipeline.py prepare-ai {session_dir}"
         )
-    if run_ai_analysis(chunk_paths, cfg, paths, force=getattr(args, "force", False)):
+    party = load_party(pdf_assets_dir(session_dir, resolve_pdf_config(cfg)))
+    if run_ai_analysis(chunk_paths, cfg, paths, force=getattr(args, "force", False), party=party):
         build_reports(paths, cfg)
 
 

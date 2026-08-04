@@ -282,7 +282,7 @@ class TestCli:
         paths, _ = _make_session(tmp_path, [{"a": 1}])
         calls = {}
         monkeypatch.setattr(dp, "run_ai_analysis",
-                            lambda chunk_paths, cfg, paths, force=False: calls.update(
+                            lambda chunk_paths, cfg, paths, force=False, party=None: calls.update(
                                 {"chunks": [p.name for p in chunk_paths], "force": force}) or True)
         monkeypatch.setattr(dp, "build_reports", lambda paths, cfg: calls.update({"reports": True}))
         rc = dp.main(["ai-analyze", str(tmp_path), "--force"])
@@ -347,3 +347,62 @@ class TestDotenv:
         args = argparse.Namespace(session_dir=str(tmp_path), config=None)
         dp.load_cfg(args)
         assert dp.os.environ.get("DOTENV_WIRED") == "yes"
+
+
+class TestPartyContext:
+    def _party(self):
+        return [
+            {"name": "Гай", "class_ru": "Чародей 6",
+             "spells": ["Гипнотический узор (Hypnotic Pattern)", "Паутина (Web)"],
+             "notes_ru": "слепой подросток"},
+            {"name": "Ангрон", "class_ru": "Воин 6", "spells": [],
+             "notes_ru": "не кастер, не доверяет магам"},
+        ]
+
+    def test_empty_party_gives_empty_block(self):
+        assert dp.party_context_block([]) == ""
+
+    def test_block_contains_members_spells_and_rule(self):
+        block = dp.party_context_block(self._party())
+        assert "Гай" in block and "Чародей 6" in block
+        assert "Hypnotic Pattern" in block
+        assert "не доверяет магам" in block
+        assert "только тот, у кого оно есть" in block
+
+    def test_prompt_without_party_unchanged(self):
+        chunk = {"session": "t", "chunk_index": 0}
+        assert dp.prompt_for_chunk(chunk) == dp.prompt_for_chunk(chunk, [])
+        assert "Партия" not in dp.prompt_for_chunk(chunk)
+
+    def test_prompt_with_party_includes_spells(self):
+        chunk = {"session": "t", "chunk_index": 0}
+        prompt = dp.prompt_for_chunk(chunk, self._party())
+        assert "Hypnotic Pattern" in prompt
+        assert prompt.index("Hypnotic Pattern") < prompt.index("Вот фрагмент")
+
+    def test_build_ai_jobs_hash_stable_without_party(self, tmp_path):
+        paths, chunk_paths = _make_session(tmp_path, [{"a": 1}])
+        jobs, _ = dp.build_ai_jobs(chunk_paths, paths, {"chunks": {}}, force=False)
+        assert jobs[0].chunk_hash == dp.stable_hash({"a": 1})
+
+    def test_build_ai_jobs_hash_changes_with_party(self, tmp_path):
+        paths, chunk_paths = _make_session(tmp_path, [{"a": 1}])
+        jobs, _ = dp.build_ai_jobs(chunk_paths, paths, {"chunks": {}}, force=False,
+                                   party=self._party())
+        assert jobs[0].chunk_hash != dp.stable_hash({"a": 1})
+        assert "Hypnotic Pattern" in jobs[0].prompt
+
+    def test_run_ai_analysis_passes_party_to_jobs(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        paths, chunk_paths = _make_session(tmp_path, [{"a": 1}])
+        fake = FakeProvider([AIResult(name="chunk_000", data={"summary": "ok"})])
+        monkeypatch.setattr(dp, "make_ai_provider", lambda ai, key: fake)
+        dp.run_ai_analysis(chunk_paths, _ai_cfg(mode="direct"), paths, party=self._party())
+        assert "Hypnotic Pattern" in fake.seen_jobs[0].prompt
+
+    def test_synthesis_prompt_includes_class_and_spells(self):
+        prompt = dp.synthesis_prompt(
+            {"session": "t", "summaries": [], "mvp_top": [], "key_actions": []},
+            self._party(),
+        )
+        assert "Чародей 6" in prompt

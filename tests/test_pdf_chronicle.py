@@ -529,8 +529,8 @@ class TestCmdRunPdfGuard:
         monkeypatch.setattr(dp, "write_clean_outputs", lambda rows, cfg, paths: None)
         monkeypatch.setattr(dp, "write_quality_report", lambda raw, clean, cfg, paths: None)
         monkeypatch.setattr(dp, "make_chunks", lambda rows, cfg, paths: [])
-        monkeypatch.setattr(dp, "make_prompts", lambda chunk_paths, paths: None)
-        monkeypatch.setattr(dp, "run_ai_analysis", lambda chunk_paths, cfg, paths, force=False: True)
+        monkeypatch.setattr(dp, "make_prompts", lambda chunk_paths, paths, party=None: None)
+        monkeypatch.setattr(dp, "run_ai_analysis", lambda chunk_paths, cfg, paths, force=False, party=None: True)
         monkeypatch.setattr(dp, "build_reports", lambda paths, cfg: None)
         return session
 
