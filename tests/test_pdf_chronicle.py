@@ -563,3 +563,27 @@ class TestCmdRunPdfGuard:
             rc = dp.main(["build-pdf", str(session)])
         assert rc == 1
         assert "typst сломался" in caplog.text
+
+
+class TestNullValuesNormalized:
+    def test_null_string_fields_get_defaults(self, tmp_path):
+        # gpt-4.1 через openai_compatible возвращает null в строковых полях —
+        # схема там не форсится; шаблон ждёт строки.
+        results = [{
+            "chunk_index": 0, "summary": "s",
+            "actions": [{"time": None, "character": None, "action": "x", "outcome": None, "importance": None}],
+            "dice_rolls": [{"time": None, "character": None, "roll_type": None, "die": None,
+                            "natural": None, "modifier": None, "total": None,
+                            "context": None, "confidence": None, "raw_text": None}],
+            "mvp_signals": [{"time": None, "character": "Гай", "category": None, "reason": None, "weight": 1}],
+        }]
+        report_data = dp.compute_report_data(results, {"session_name": "t"})
+        data = dp.build_pdf_data({"session_name": "t"}, dp.resolve_pdf_config({}),
+                                 report_data, None, [], {})
+        a = data["actions"][0]
+        assert a["time"] == "" and a["character"] == "" and a["outcome"] == ""
+        d = data["dice"][0]
+        assert d["time"] == "" and d["roll_type"] == "" and d["context"] == ""
+        assert d["natural"] is None  # числовые null'ы законны, их печатает repr
+        m = data["mvp_events"][0]
+        assert m["category"] == "" and m["reason"] == ""

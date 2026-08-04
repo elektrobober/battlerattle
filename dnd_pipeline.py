@@ -1808,14 +1808,19 @@ def find_scene_images(assets_dir: Path) -> dict[int, Path]:
 
 
 def _with_defaults(record: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
-    """Копия record, где отсутствующие ключи заполнены дефолтами.
+    """Копия record, где отсутствующие И null-значения заполнены дефолтами.
 
-    Ручной AI-JSON (вставленный пользователем вручную из чата) может не
-    содержать всех полей схемы — а .typ-шаблон обращается к полям напрямую
-    (data.foo), так что любой отсутствующий ключ роняет всю сборку PDF.
-    Нормализуем записи здесь, а не в шаблоне.
+    Ручной AI-JSON может не содержать всех полей схемы, а openai_compatible
+    провайдеры (схема не форсится) возвращают null в строковых полях —
+    .typ-шаблон обращается к полям напрямую (data.foo) и падает на none.
+    Нормализуем записи здесь, а не в шаблоне. Дефолт None (числовые поля
+    бросков) остаётся None — их печатает repr.
     """
-    return {**defaults, **record}
+    out = dict(record)
+    for key, default in defaults.items():
+        if out.get(key) is None:
+            out[key] = default
+    return out
 
 
 def build_pdf_data(
@@ -1963,7 +1968,7 @@ def compute_report_data(results: list[dict[str, Any]], cfg: dict[str, Any]) -> d
         mvp_categories[char][cat] = mvp_categories[char].get(cat, 0) + weight
 
     return {
-        "actions": sorted(actions, key=lambda x: x.get("time", "")),
+        "actions": sorted(actions, key=lambda x: x.get("time") or ""),
         "dice": dice,
         "dice_stats": dice_stats,
         "mvp_events": mvp_events,
