@@ -152,6 +152,10 @@ python3 dnd_pipeline.py run /path/to/session --quality-profile balanced
 
 **`openai_compatible`** — любой сервер с OpenAI-совместимым `/chat/completions`: локальный Ollama (`http://localhost:11434/v1`), LM Studio (`http://localhost:1234/v1`), OpenRouter, vLLM. Нужен `ai.base_url`; ключ опционален. С локальной моделью пайплайн полностью офлайн.
 
+У самого OpenAI работает и Batch API — `ai.mode: "batch"` с `base_url: "https://api.openai.com/v1"`. Это не просто скидка 50%: батч живёт в отдельной очереди и **не тратит TPM**. На младших тарифах это единственный рабочий режим — лимит tier-1 у `gpt-4.1` равен 30 000 токенов в минуту, а один десятиминутный чанк с party-контекстом весит ~45–55к, то есть синхронный запрос не влезает в окно в принципе и получает 429 сколько ни жди. Очередь батча тоже конечна (у tier-1 ~900k enqueued-токенов), поэтому пайплайн сам режет чанки на пачки по `ai.batch_token_budget` и шлёт их по очереди. Окно — 24 часа, обычно быстрее; `batch_id` сохраняется, прерванное ожидание продолжается со следующего запуска.
+
+Локальным серверам (Ollama, LM Studio) батча не завезли — для них `mode` по умолчанию `direct`.
+
 Прервал во время ожидания batch — не страшно: `batch_id` сохраняется, повторный запуск продолжит ждать тот же batch без повторной оплаты.
 
 ```bash
@@ -166,11 +170,12 @@ python3 dnd_pipeline.py ai-analyze /path/to/session --force    # пересчи�
 | `enabled` | `false` | Автоматический AI-этап. `false` — ручной режим |
 | `provider` | `"anthropic"` | `"anthropic"` или `"openai_compatible"` |
 | `model` | `"claude-sonnet-5"` | Имя модели у провайдера |
-| `mode` | `"batch"` | Только anthropic: `"batch"` (дешевле, ~час) или `"direct"` (минуты) |
+| `mode` | `"batch"` (anthropic), `"direct"` (openai_compatible) | `"batch"` — дешевле вдвое и мимо TPM, окно до 24 часов; `"direct"` — обычные запросы, за минуты |
 | `base_url` | `null` | Обязателен для `openai_compatible` |
 | `api_key_env` | `null` | Имя env-переменной с ключом; default `ANTHROPIC_API_KEY` для anthropic, для `openai_compatible` не требуется |
 | `max_output_tokens` | `8000` | Лимит ответа на чанк |
-| `concurrency` | `2` | Параллелизм (direct/openai_compatible) |
+| `concurrency` | `2` | Параллелизм (только `direct`) |
+| `batch_token_budget` | `700000` | OpenAI batch: потолок enqueued-токенов на пачку; чанки сверх лимита уезжают следующей |
 
 ### Ручной режим (fallback)
 

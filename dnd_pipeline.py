@@ -231,7 +231,9 @@ AI_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "provider": "anthropic",          # "anthropic" | "openai_compatible"
     "model": "claude-sonnet-5",
-    "mode": "batch",                  # anthropic only: "batch" | "direct"
+    "mode": "batch",                  # "batch" | "direct"; для openai_compatible по умолчанию direct
+    "batch_token_budget": 700_000,    # openai batch: потолок enqueued-токенов на одну пачку
+    "structured_output": None,        # strict json_schema; None — авто (только у самого OpenAI)
     "base_url": None,                 # openai_compatible: e.g. http://localhost:11434/v1
     "api_key_env": None,              # env var name; default ANTHROPIC_API_KEY for anthropic
     "max_output_tokens": 8000,
@@ -245,6 +247,12 @@ def resolve_ai_config(cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Неизвестный ai.provider: {ai['provider']} (жду anthropic или openai_compatible)")
     if ai["provider"] == "openai_compatible" and not ai["base_url"]:
         raise ValueError("Для ai.provider=openai_compatible нужен ai.base_url (например http://localhost:11434/v1)")
+    if ai["provider"] == "openai_compatible" and "mode" not in (cfg.get("ai") or {}):
+        # Batch есть у OpenAI, но не у Ollama/LM Studio — молча включать его нельзя.
+        ai["mode"] = "direct"
+    if ai["structured_output"] is None:
+        # strict json_schema понимает OpenAI; локальные серверы на нём падают.
+        ai["structured_output"] = "api.openai.com" in (ai["base_url"] or "")
     return ai
 
 
@@ -1510,6 +1518,22 @@ def make_ai_provider(ai: dict[str, Any], api_key: str | None) -> Any:
             max_output_tokens=ai["max_output_tokens"],
             concurrency=ai["concurrency"],
         )
+    from ai_providers import EVENTS_SCHEMA
+
+    schema = EVENTS_SCHEMA if ai["structured_output"] else None
+    if ai["mode"] == "batch":
+        from ai_providers import OpenAIBatchProvider
+
+        return OpenAIBatchProvider(
+            model=ai["model"],
+            base_url=ai["base_url"],
+            api_key=api_key,
+            max_output_tokens=ai["max_output_tokens"],
+            normalize=normalize_json_text,
+            token_budget=ai["batch_token_budget"],
+            schema=schema,
+            schema_name="chunk_events",
+        )
     from ai_providers import OpenAICompatProvider
 
     return OpenAICompatProvider(
@@ -1519,6 +1543,8 @@ def make_ai_provider(ai: dict[str, Any], api_key: str | None) -> Any:
         max_output_tokens=ai["max_output_tokens"],
         concurrency=ai["concurrency"],
         normalize=normalize_json_text,
+        schema=schema,
+        schema_name="chunk_events",
     )
 
 
@@ -1582,7 +1608,7 @@ def run_ai_analysis(
     provider = make_ai_provider(ai, api_key)
     logger.info(f"AI-анализ: provider={ai['provider']}, model={ai['model']}, чанков в работе: {total}")
 
-    if ai["provider"] == "anthropic" and ai["mode"] == "batch":
+    if ai["mode"] == "batch":
         def on_batch_created(batch_id: str) -> None:
             state["pending_batch"] = {
                 "batch_id": batch_id,
@@ -1654,8 +1680,14 @@ def synthesis_prompt(payload: dict[str, Any], party: list[dict[str, Any]]) -> st
 Ты собираешь материалы для PDF-хроники сессии. Верни СТРОГО JSON.
 
 Задачи:
-1. recap — художественный пересказ сессии, 4-6 абзацев на русском,
-   «что было в прошлый раз» для игроков перед следующей игрой.
+1. recap — «что было в прошлый раз» для игроков перед следующей игрой:
+   связная хроника на русском, 4-6 абзацев. ОДНА строка, абзацы разделяй
+   пустой строкой (\\n\\n), не массив и не список.
+   Пиши о событиях мира в прошедшем времени: места, поступки, находки,
+   с кем говорили и чем кончилось. Не пересказывай встречу за столом —
+   никаких «сессия началась», «партия обсуждала», шуток игроков, бросков
+   кубов и номеров чанков. Последний абзац — то место, где отряд замер
+   перед следующей игрой.
 2. quest_hooks — нерешённые нити, добытые сведения, открытые направления
    (title + description, по-русски).
 3. scenes — 3-5 самых кинематографичных сцен сессии. Для каждой:
@@ -1676,6 +1708,32 @@ def synthesis_prompt(payload: dict[str, Any], party: list[dict[str, Any]]) -> st
 """
 
 
+def _as_text(value: Any) -> str:
+    """Список абзацев → строка. Схему форсит только OpenAI, остальные вольны
+    вернуть массив там, где шаблон ждёт текст, — и Typst печатает repr."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return "\n\n".join(_as_text(v) for v in value if v is not None)
+    return str(value)
+
+
+def normalize_synthesis(data: dict[str, Any]) -> dict[str, Any]:
+    """Приводит синтез к форме, которую ждёт .typ-шаблон."""
+    out = dict(data or {})
+    out["recap"] = _as_text(out.get("recap"))
+    out["quest_hooks"] = [
+        {**h, "title": _as_text(h.get("title")), "description": _as_text(h.get("description"))}
+        for h in (out.get("quest_hooks") or [])
+    ]
+    out["scenes"] = [
+        {**sc, "title": _as_text(sc.get("title")), "time": _as_text(sc.get("time")),
+         "image_prompt": _as_text(sc.get("image_prompt"))}
+        for sc in (out.get("scenes") or [])
+    ]
+    return out
+
+
 def make_synthesis_provider(ai: dict[str, Any], api_key: str | None) -> Any:
     from ai_providers import (SYNTHESIS_REQUIRED_FIELDS, SYNTHESIS_SCHEMA,
                               AnthropicProvider, OpenAICompatProvider)
@@ -1686,10 +1744,25 @@ def make_synthesis_provider(ai: dict[str, Any], api_key: str | None) -> Any:
             max_output_tokens=ai["max_output_tokens"], concurrency=1,
             schema=SYNTHESIS_SCHEMA,
         )
+    if ai["mode"] == "batch":
+        from ai_providers import OpenAIBatchProvider
+
+        # Синтез — один запрос, но крупный: сводка по всем чанкам не влезает
+        # в минутный лимит младших тарифов так же, как и сами чанки.
+        return OpenAIBatchProvider(
+            model=ai["model"], base_url=ai["base_url"], api_key=api_key,
+            max_output_tokens=ai["max_output_tokens"],
+            normalize=normalize_json_text, required_fields=SYNTHESIS_REQUIRED_FIELDS,
+            token_budget=ai["batch_token_budget"],
+            schema=SYNTHESIS_SCHEMA if ai["structured_output"] else None,
+            schema_name="session_synthesis",
+        )
     return OpenAICompatProvider(
         model=ai["model"], base_url=ai["base_url"], api_key=api_key,
         max_output_tokens=ai["max_output_tokens"], concurrency=1,
         normalize=normalize_json_text, required_fields=SYNTHESIS_REQUIRED_FIELDS,
+        schema=SYNTHESIS_SCHEMA if ai["structured_output"] else None,
+        schema_name="session_synthesis",
     )
 
 
@@ -1717,7 +1790,7 @@ def run_session_synthesis(
     cfg: dict[str, Any], paths: Paths, party: list[dict[str, Any]], force: bool = False
 ) -> dict[str, Any] | None:
     """Сессионный синтез для PDF. None → недоступен (выключен/нет ключа/ошибка)."""
-    from ai_providers import ChunkJob
+    from ai_providers import AIResult, ChunkJob
 
     ai = resolve_ai_config(cfg)
     if not ai["enabled"]:
@@ -1742,21 +1815,40 @@ def run_session_synthesis(
     cached = state.get("synthesis")
     if not force and cached and cached.get("input_hash") == input_hash and synth_path.exists():
         logger.info("Синтез сессии: беру из кэша.")
-        return load_json(synth_path)
+        return normalize_synthesis(load_json(synth_path))
 
     provider = make_synthesis_provider(ai, api_key)
     logger.info(f"Синтез сессии: provider={ai['provider']}, model={ai['model']}…")
-    result = provider.analyze([ChunkJob(name="synthesis", prompt=prompt, chunk_hash=input_hash)])[0]
+    job = ChunkJob(name="synthesis", prompt=prompt, chunk_hash=input_hash)
+    if ai["provider"] == "openai_compatible" and ai["mode"] == "batch":
+        pending = state.get("pending_synthesis")
+        resume_batch_id = None
+        if pending and pending.get("input_hash") == input_hash:
+            resume_batch_id = pending["batch_id"]
+            logger.info(f"Синтез сессии: продолжаю незавершённый batch {resume_batch_id}.")
+
+        def on_batch_created(batch_id: str) -> None:
+            state["pending_synthesis"] = {"batch_id": batch_id, "input_hash": input_hash}
+            save_ai_state(paths, state)
+
+        batch_results = provider.analyze(
+            [job], resume_batch_id=resume_batch_id, on_batch_created=on_batch_created
+        )
+        result = batch_results[0] if batch_results else AIResult(name="synthesis", error="batch без результата")
+    else:
+        result = provider.analyze([job])[0]
     if result.data is None:
         logger.warning(f"Синтез сессии не удался: {result.error}")
         return None
 
-    write_json(synth_path, result.data)
-    write_image_prompts_md(result.data, paths.out_dir / "image_prompts.md")
+    data = normalize_synthesis(result.data)
+    write_json(synth_path, data)
+    write_image_prompts_md(data, paths.out_dir / "image_prompts.md")
     state["synthesis"] = {"input_hash": input_hash, "model": ai["model"], "provider": ai["provider"]}
+    state["pending_synthesis"] = None
     save_ai_state(paths, state)
     logger.info(f"Синтез готов: {synth_path.name}, промпты картинок: image_prompts.md")
-    return result.data
+    return data
 
 
 # ──────────────────────────────────────────────────────────────

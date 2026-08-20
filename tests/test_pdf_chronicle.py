@@ -587,3 +587,125 @@ class TestNullValuesNormalized:
         assert d["natural"] is None  # числовые null'ы законны, их печатает repr
         m = data["mvp_events"][0]
         assert m["category"] == "" and m["reason"] == ""
+
+
+class FakeSynthBatchProvider:
+    """Провайдер с батч-интерфейсом: помнит, чем его звали."""
+
+    def __init__(self, result, batch_id="batch_synth"):
+        self.result = result
+        self.batch_id = batch_id
+        self.seen_prompt = None
+        self.seen_resume = "unset"
+        self.created = []
+
+    def analyze(self, jobs, on_result=None, resume_batch_id=None, on_batch_created=None):
+        self.seen_prompt = jobs[0].prompt
+        self.seen_resume = resume_batch_id
+        if resume_batch_id is None and on_batch_created:
+            on_batch_created(self.batch_id)
+            self.created.append(self.batch_id)
+        return [self.result]
+
+
+class TestSynthesisBatch:
+    def _cfg(self, **over):
+        ai = {"enabled": True, "provider": "openai_compatible",
+              "base_url": "https://api.openai.com/v1", "model": "gpt-4.1", "mode": "batch"}
+        ai.update(over)
+        return {"session_name": "test", "ai": ai}
+
+    def test_batch_mode_selects_batch_provider(self):
+        ai = dp.resolve_ai_config(self._cfg())
+        p = dp.make_synthesis_provider(ai, "sk-test")
+        assert type(p).__name__ == "OpenAIBatchProvider"
+        assert p.required_fields == ("recap", "quest_hooks", "scenes")
+
+    def test_direct_mode_keeps_sync_provider(self):
+        ai = dp.resolve_ai_config(self._cfg(mode="direct"))
+        assert type(dp.make_synthesis_provider(ai, "sk-test")).__name__ == "OpenAICompatProvider"
+
+    def test_anthropic_synthesis_stays_direct(self):
+        ai = dp.resolve_ai_config({"ai": {"enabled": True}})
+        p = dp.make_synthesis_provider(ai, "sk-test")
+        assert type(p).__name__ == "AnthropicProvider" and p.mode == "direct"
+
+    def test_batch_id_saved_then_cleared(self, tmp_path, monkeypatch):
+        provider = FakeSynthBatchProvider(AIResult(name="synthesis", data=_synthesis_ok()))
+        paths = _session_with_results(tmp_path, monkeypatch, provider)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        dp.run_session_synthesis(self._cfg(), paths, [])
+        assert provider.created == ["batch_synth"]
+        assert dp.load_ai_state(paths).get("pending_synthesis") is None
+
+    def test_interrupted_batch_is_resumed(self, tmp_path, monkeypatch):
+        crashed = FakeSynthBatchProvider(AIResult(name="synthesis", error="прервано"))
+        paths = _session_with_results(tmp_path, monkeypatch, crashed)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        assert dp.run_session_synthesis(self._cfg(), paths, []) is None
+        state = dp.load_ai_state(paths)
+        assert state["pending_synthesis"]["batch_id"] == "batch_synth"
+
+        again = FakeSynthBatchProvider(AIResult(name="synthesis", data=_synthesis_ok()))
+        monkeypatch.setattr(dp, "make_synthesis_provider", lambda ai, key: again)
+        result = dp.run_session_synthesis(self._cfg(), paths, [])
+        assert result["recap"].startswith("Партия")
+        assert again.seen_resume == "batch_synth"   # тот же батч, второй раз не платим
+        assert again.created == []
+
+
+class TestSynthesisShape:
+    """Схему форсит только OpenAI; локальные модели вольны вернуть что угодно."""
+
+    def test_recap_list_joined_into_paragraphs(self):
+        out = dp.normalize_synthesis({"recap": ["Первый абзац.", "Второй абзац."],
+                                      "quest_hooks": [], "scenes": []})
+        assert out["recap"] == "Первый абзац.\n\nВторой абзац."
+
+    def test_recap_string_untouched(self):
+        out = dp.normalize_synthesis({"recap": "Уже строка.", "quest_hooks": [], "scenes": []})
+        assert out["recap"] == "Уже строка."
+
+    def test_recap_null_becomes_empty(self):
+        assert dp.normalize_synthesis({"recap": None})["recap"] == ""
+
+    def test_nested_list_values_flattened(self):
+        out = dp.normalize_synthesis({
+            "recap": "r",
+            "quest_hooks": [{"title": "Щит", "description": ["Раз.", "Два."]}],
+            "scenes": [{"title": "Бой", "chunk_index": 0, "time": "00:00:00.000",
+                        "image_prompt": ["dark", "fantasy"]}],
+        })
+        assert out["quest_hooks"][0]["description"] == "Раз.\n\nДва."
+        assert out["scenes"][0]["image_prompt"] == "dark\n\nfantasy"
+
+    def test_missing_keys_survive(self):
+        assert dp.normalize_synthesis({})["recap"] == ""
+
+
+class TestSynthesisPromptQuality:
+    def _prompt(self):
+        return dp.synthesis_prompt(
+            {"session": "t", "summaries": [], "mvp_top": [], "key_actions": []}, [])
+
+    def test_demands_single_string_recap(self):
+        p = self._prompt()
+        assert "не массив" in p and "\\n\\n" in p
+
+    def test_forbids_table_talk(self):
+        p = self._prompt()
+        assert "сессия началась" in p and "шуток игроков" in p
+
+
+class TestCachedSynthesisNormalized:
+    def test_broken_cache_is_repaired_on_read(self, tmp_path, monkeypatch):
+        provider = FakeSynthProvider(AIResult(name="synthesis", data=_synthesis_ok()))
+        paths = _session_with_results(tmp_path, monkeypatch, provider)
+        cfg = {"session_name": "test", "ai": {"enabled": True}}
+        dp.run_session_synthesis(cfg, paths, [])
+        # файл с прошлого запуска, где recap приехал массивом
+        broken = dp.load_json(paths.out_dir / "session_synthesis.json")
+        broken["recap"] = ["Абзац раз.", "Абзац два."]
+        dp.write_json(paths.out_dir / "session_synthesis.json", broken)
+        result = dp.run_session_synthesis(cfg, paths, [])
+        assert result["recap"] == "Абзац раз.\n\nАбзац два."

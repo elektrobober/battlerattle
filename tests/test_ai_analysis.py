@@ -406,3 +406,50 @@ class TestPartyContext:
             self._party(),
         )
         assert "Чародей 6" in prompt
+
+
+class TestOpenAIBatchWiring:
+    def _ai(self, **over):
+        cfg = {"provider": "openai_compatible", "base_url": "https://api.openai.com/v1",
+               "model": "gpt-4.1"}
+        cfg.update(over)
+        return dp.resolve_ai_config({"ai": cfg})
+
+    def test_mode_batch_selects_batch_provider(self):
+        p = dp.make_ai_provider(self._ai(mode="batch"), "sk-test")
+        assert type(p).__name__ == "OpenAIBatchProvider"
+        assert p.model == "gpt-4.1"
+        assert p.normalize is dp.normalize_json_text
+
+    def test_openai_compatible_defaults_to_direct(self):
+        """Локальным Ollama/LM Studio батч не завезли — молча включать его нельзя."""
+        ai = self._ai()
+        assert ai["mode"] == "direct"
+        assert type(dp.make_ai_provider(ai, None)).__name__ == "OpenAICompatProvider"
+
+    def test_anthropic_keeps_batch_default(self):
+        assert dp.resolve_ai_config({"ai": {}})["mode"] == "batch"
+
+    def test_token_budget_from_config(self):
+        p = dp.make_ai_provider(self._ai(mode="batch", batch_token_budget=123456), "sk-test")
+        assert p.token_budget == 123456
+
+    def test_batch_id_saved_for_resume(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        paths, chunk_paths = _make_session(tmp_path, [{"a": 1}])
+
+        class BatchProvider:
+            def analyze(self, jobs, on_result=None, resume_batch_id=None, on_batch_created=None):
+                on_batch_created("batch_abc")
+                res = AIResult(name="chunk_000", data={"summary": "ok"})
+                on_result(res)
+                return [res]
+
+        monkeypatch.setattr(dp, "make_ai_provider", lambda ai, key: BatchProvider())
+        cfg = {"session_name": "test", "ai": {"enabled": True, "provider": "openai_compatible",
+                                              "base_url": "https://api.openai.com/v1",
+                                              "model": "gpt-4.1", "mode": "batch"}}
+        dp.run_ai_analysis(chunk_paths, cfg, paths)
+        state = dp.load_ai_state(paths)
+        assert state["pending_batch"] is None          # батч дошёл до конца — чистим
+        assert state["chunks"]["chunk_000"]["status"] == "done"

@@ -381,3 +381,314 @@ class TestRateLimitBackoff:
         p = ap.OpenAICompatProvider(model="m", base_url="http://x/v1", concurrency=1)
         p.analyze([ap.ChunkJob("chunk_000", "p", "h")])
         assert sleeps[0] == 1
+
+
+class TestRateLimitBudget:
+    """429 не должен съедать бюджет ретраев, отведённый под сетевые сбои и 5xx."""
+
+    def _always_429(self, calls, ok_after, headers=None):
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if ok_after is None or calls["n"] <= ok_after:
+                raise urllib.error.HTTPError(req.full_url, 429, "rate limited",
+                                             headers or {}, io.BytesIO(b""))
+            return _fake_response(_ok_content())
+        return fake_urlopen
+
+    def test_429_does_not_consume_5xx_retry_budget(self, monkeypatch):
+        calls = {"n": 0}
+        monkeypatch.setattr(ap.time, "sleep", lambda s: None)
+        monkeypatch.setattr(ap.urllib.request, "urlopen", self._always_429(calls, ok_after=6))
+        p = ap.OpenAICompatProvider(model="m", base_url="http://x/v1", concurrency=1, retries=2)
+        results = p.analyze([ap.ChunkJob("chunk_000", "p", "h")])
+        assert results[0].error is None
+        assert calls["n"] == 7
+
+    def test_429_reads_ratelimit_reset_tokens_header(self, monkeypatch):
+        sleeps = []
+        calls = {"n": 0}
+        monkeypatch.setattr(ap.time, "sleep", sleeps.append)
+        monkeypatch.setattr(ap.urllib.request, "urlopen",
+                            self._always_429(calls, ok_after=1,
+                                             headers={"x-ratelimit-reset-tokens": "6m0s"}))
+        p = ap.OpenAICompatProvider(model="m", base_url="http://x/v1", concurrency=1)
+        p.analyze([ap.ChunkJob("chunk_000", "p", "h")])
+        assert sleeps[0] == 180  # окно 6 минут, ждём не дольше потолка
+
+    def test_429_backoff_escalates_without_headers(self, monkeypatch):
+        sleeps = []
+        calls = {"n": 0}
+        monkeypatch.setattr(ap.time, "sleep", sleeps.append)
+        monkeypatch.setattr(ap.urllib.request, "urlopen", self._always_429(calls, ok_after=3))
+        p = ap.OpenAICompatProvider(model="m", base_url="http://x/v1", concurrency=1)
+        p.analyze([ap.ChunkJob("chunk_000", "p", "h")])
+        assert sleeps == sorted(sleeps) and sleeps[0] < sleeps[-1]
+
+    def test_429_gives_up_after_rate_limit_budget(self, monkeypatch):
+        calls = {"n": 0}
+        monkeypatch.setattr(ap.time, "sleep", lambda s: None)
+        monkeypatch.setattr(ap.urllib.request, "urlopen", self._always_429(calls, ok_after=None))
+        p = ap.OpenAICompatProvider(model="m", base_url="http://x/v1", concurrency=1,
+                                    rate_limit_retries=4)
+        results = p.analyze([ap.ChunkJob("chunk_000", "p", "h")])
+        assert calls["n"] == 4
+        assert "429" in results[0].error or "лимит" in results[0].error.lower()
+
+
+class TestParseResetDuration:
+    def test_formats(self):
+        assert ap.parse_reset_duration("6m0s") == 360
+        assert ap.parse_reset_duration("1.5s") == 1.5
+        assert ap.parse_reset_duration("20ms") == 0.02
+        assert ap.parse_reset_duration("1h2m3s") == 3723
+        assert ap.parse_reset_duration("") is None
+        assert ap.parse_reset_duration("garbage") is None
+
+
+class TestRateLimitTinyHints:
+    """OpenAI шлёт '6ms' в reset-заголовке — верить этому нельзя, 429 уже прилетел."""
+
+    def _fake_429_then_ok(self, headers):
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise urllib.error.HTTPError(req.full_url, 429, "rate limited",
+                                             headers, io.BytesIO(b""))
+            return _fake_response(_ok_content())
+        return fake_urlopen
+
+    def test_sub_second_reset_header_ignored(self, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr(ap.time, "sleep", sleeps.append)
+        monkeypatch.setattr(ap.urllib.request, "urlopen",
+                            self._fake_429_then_ok({"x-ratelimit-reset-tokens": "6ms"}))
+        p = ap.OpenAICompatProvider(model="m", base_url="http://x/v1", concurrency=1)
+        p.analyze([ap.ChunkJob("chunk_000", "p", "h")])
+        assert sleeps[0] >= 20
+
+    def test_zero_retry_after_ignored(self, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr(ap.time, "sleep", sleeps.append)
+        monkeypatch.setattr(ap.urllib.request, "urlopen",
+                            self._fake_429_then_ok({"Retry-After": "0"}))
+        p = ap.OpenAICompatProvider(model="m", base_url="http://x/v1", concurrency=1)
+        p.analyze([ap.ChunkJob("chunk_000", "p", "h")])
+        assert sleeps[0] >= 20
+
+
+def _raw_response(payload: bytes):
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    return Resp(payload)
+
+
+class _FakeOpenAIBatchServer:
+    """Мини-сервер Batch API: files → batches → poll → content."""
+
+    def __init__(self, statuses=None, output_lines=None, error_lines=None):
+        self.statuses = list(statuses or ["completed"])
+        self.output_lines = output_lines
+        self.error_lines = error_lines
+        self.uploaded: list[bytes] = []
+        self.created: list[dict] = []
+        self.polls = 0
+
+    def _ok_line(self, custom_id):
+        return {
+            "custom_id": custom_id,
+            "response": {"status_code": 200,
+                         "body": {"choices": [{"message": {"content": _ok_content()}}]}},
+            "error": None,
+        }
+
+    def urlopen(self, req, timeout=None):
+        url, method = req.full_url, req.get_method()
+        if url.endswith("/files") and method == "POST":
+            self.uploaded.append(req.data)
+            return _raw_response(json.dumps({"id": "file-in"}).encode())
+        if url.endswith("/batches") and method == "POST":
+            self.created.append(json.loads(req.data.decode()))
+            return _raw_response(json.dumps({"id": f"batch_{len(self.created)}",
+                                             "status": "validating"}).encode())
+        if "/batches/" in url and method == "GET":
+            self.polls += 1
+            status = self.statuses[min(self.polls - 1, len(self.statuses) - 1)]
+            body = {"id": url.rsplit("/", 1)[-1], "status": status,
+                    "request_counts": {"total": 2, "completed": 2, "failed": 0}}
+            if status == "completed":
+                body["output_file_id"] = "file-out"
+                if self.error_lines:
+                    body["error_file_id"] = "file-err"
+            return _raw_response(json.dumps(body).encode())
+        if "/files/file-out/content" in url:
+            lines = self.output_lines
+            if lines is None:
+                names = [json.loads(l)["custom_id"]
+                         for l in self.uploaded[-1].decode().splitlines() if l.strip().startswith("{")]
+                lines = [self._ok_line(n) for n in names]
+            return _raw_response("\n".join(json.dumps(l) for l in lines).encode())
+        if "/files/file-err/content" in url:
+            return _raw_response("\n".join(json.dumps(l) for l in self.error_lines).encode())
+        raise AssertionError(f"неожиданный запрос: {method} {url}")
+
+
+def _batch_provider(**kw):
+    kw.setdefault("model", "gpt-4.1")
+    kw.setdefault("base_url", "https://api.openai.com/v1")
+    kw.setdefault("api_key", "sk-test")
+    kw.setdefault("poll_interval", 0)
+    return ap.OpenAIBatchProvider(**kw)
+
+
+class TestOpenAIBatchProvider:
+    def _jobs(self, n=2, prompt="p"):
+        return [ap.ChunkJob(f"chunk_{i:03d}", prompt, f"h{i}") for i in range(n)]
+
+    def test_full_flow_uploads_creates_and_parses(self, monkeypatch):
+        server = _FakeOpenAIBatchServer(statuses=["in_progress", "completed"])
+        monkeypatch.setattr(ap.time, "sleep", lambda s: None)
+        monkeypatch.setattr(ap.urllib.request, "urlopen", server.urlopen)
+        seen = []
+        results = _batch_provider().analyze(self._jobs(), on_result=seen.append)
+
+        assert [r.name for r in results] == ["chunk_000", "chunk_001"]
+        assert all(r.error is None for r in results)
+        assert len(seen) == 2
+        # входной JSONL — по строке на чанк, в формате Batch API
+        lines = [json.loads(l) for l in server.uploaded[0].decode().splitlines()
+                 if l.strip().startswith("{")]
+        assert [l["custom_id"] for l in lines] == ["chunk_000", "chunk_001"]
+        assert lines[0]["method"] == "POST"
+        assert lines[0]["url"] == "/v1/chat/completions"
+        assert lines[0]["body"]["model"] == "gpt-4.1"
+        assert lines[0]["body"]["messages"][0]["content"] == "p"
+        assert server.created[0] == {"input_file_id": "file-in",
+                                     "endpoint": "/v1/chat/completions",
+                                     "completion_window": "24h"}
+
+    def test_reports_created_batch_id_for_resume(self, monkeypatch):
+        server = _FakeOpenAIBatchServer()
+        monkeypatch.setattr(ap.time, "sleep", lambda s: None)
+        monkeypatch.setattr(ap.urllib.request, "urlopen", server.urlopen)
+        created = []
+        _batch_provider().analyze(self._jobs(), on_batch_created=created.append)
+        assert created == ["batch_1"]
+
+    def test_resume_does_not_create_new_batch(self, monkeypatch):
+        server = _FakeOpenAIBatchServer(
+            output_lines=[{"custom_id": "chunk_000",
+                           "response": {"status_code": 200,
+                                        "body": {"choices": [{"message": {"content": _ok_content()}}]}},
+                           "error": None}])
+        monkeypatch.setattr(ap.time, "sleep", lambda s: None)
+        monkeypatch.setattr(ap.urllib.request, "urlopen", server.urlopen)
+        results = _batch_provider().analyze(self._jobs(), resume_batch_id="batch_9")
+        assert server.uploaded == [] and server.created == []
+        assert [r.name for r in results] == ["chunk_000"]
+
+    def test_failed_lines_become_chunk_errors(self, monkeypatch):
+        server = _FakeOpenAIBatchServer(output_lines=[
+            {"custom_id": "chunk_000",
+             "response": {"status_code": 200,
+                          "body": {"choices": [{"message": {"content": _ok_content()}}]}},
+             "error": None},
+            {"custom_id": "chunk_001", "response": None,
+             "error": {"code": "server_error", "message": "boom"}},
+        ])
+        monkeypatch.setattr(ap.time, "sleep", lambda s: None)
+        monkeypatch.setattr(ap.urllib.request, "urlopen", server.urlopen)
+        results = _batch_provider().analyze(self._jobs())
+        by_name = {r.name: r for r in results}
+        assert by_name["chunk_000"].error is None
+        assert "boom" in by_name["chunk_001"].error
+
+    def test_terminal_failed_status_raises_clear_error(self, monkeypatch):
+        server = _FakeOpenAIBatchServer(statuses=["failed"])
+        monkeypatch.setattr(ap.time, "sleep", lambda s: None)
+        monkeypatch.setattr(ap.urllib.request, "urlopen", server.urlopen)
+        results = _batch_provider().analyze(self._jobs())
+        assert all(r.data is None for r in results)
+        assert "failed" in results[0].error
+
+    def test_splits_jobs_by_token_budget(self, monkeypatch):
+        server = _FakeOpenAIBatchServer()
+        monkeypatch.setattr(ap.time, "sleep", lambda s: None)
+        monkeypatch.setattr(ap.urllib.request, "urlopen", server.urlopen)
+        jobs = self._jobs(3, prompt="x" * 30_000)  # ~10k токенов на чанк
+        results = _batch_provider(token_budget=25_000, max_output_tokens=1000).analyze(jobs)
+        assert len(server.created) == 2  # 2 чанка + 1 чанк
+        assert len(results) == 3
+
+    def test_single_job_over_budget_still_sent(self, monkeypatch):
+        server = _FakeOpenAIBatchServer()
+        monkeypatch.setattr(ap.time, "sleep", lambda s: None)
+        monkeypatch.setattr(ap.urllib.request, "urlopen", server.urlopen)
+        jobs = self._jobs(1, prompt="x" * 300_000)
+        results = _batch_provider(token_budget=1000).analyze(jobs)
+        assert len(server.created) == 1 and len(results) == 1
+
+
+class TestStructuredOutput:
+    """У OpenAI есть strict json_schema — с ним recap не может приехать массивом."""
+
+    def test_schema_goes_into_response_format(self, monkeypatch):
+        seen = {}
+
+        def fake_urlopen(req, timeout=None):
+            seen["body"] = json.loads(req.data.decode())
+            return _fake_response(_ok_content())
+
+        monkeypatch.setattr(ap.urllib.request, "urlopen", fake_urlopen)
+        p = ap.OpenAICompatProvider(model="gpt-4.1", base_url="https://api.openai.com/v1",
+                                    concurrency=1, schema=ap.SYNTHESIS_SCHEMA,
+                                    schema_name="synthesis")
+        p.analyze([ap.ChunkJob("synthesis", "p", "h")])
+        fmt = seen["body"]["response_format"]
+        assert fmt["type"] == "json_schema"
+        assert fmt["json_schema"]["strict"] is True
+        assert fmt["json_schema"]["name"] == "synthesis"
+        assert fmt["json_schema"]["schema"] == ap.SYNTHESIS_SCHEMA
+
+    def test_without_schema_falls_back_to_json_object(self, monkeypatch):
+        seen = {}
+
+        def fake_urlopen(req, timeout=None):
+            seen["body"] = json.loads(req.data.decode())
+            return _fake_response(_ok_content())
+
+        monkeypatch.setattr(ap.urllib.request, "urlopen", fake_urlopen)
+        ap.OpenAICompatProvider(model="llama3.1", base_url="http://localhost:11434/v1",
+                                concurrency=1).analyze([ap.ChunkJob("c", "p", "h")])
+        assert seen["body"]["response_format"] == {"type": "json_object"}
+
+    def test_batch_body_carries_schema(self, monkeypatch):
+        server = _FakeOpenAIBatchServer()
+        monkeypatch.setattr(ap.time, "sleep", lambda s: None)
+        monkeypatch.setattr(ap.urllib.request, "urlopen", server.urlopen)
+        _batch_provider(schema=ap.EVENTS_SCHEMA, schema_name="events").analyze(
+            [ap.ChunkJob("chunk_000", "p", "h")])
+        line = json.loads([l for l in server.uploaded[0].decode().splitlines()
+                           if l.strip().startswith("{")][0])
+        assert line["body"]["response_format"]["json_schema"]["schema"] == ap.EVENTS_SCHEMA
+
+    def test_schemas_are_strict_compatible(self):
+        """strict требует additionalProperties:false и все свойства в required."""
+        def walk(node):
+            if isinstance(node, dict):
+                if node.get("type") == "object":
+                    assert node.get("additionalProperties") is False
+                    assert set(node.get("properties", {})) == set(node.get("required", []))
+                for v in node.values():
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+        walk(ap.EVENTS_SCHEMA)
+        walk(ap.SYNTHESIS_SCHEMA)
