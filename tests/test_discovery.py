@@ -116,7 +116,7 @@ def test_transcribe_all_uses_discovery_when_no_tracks(tmp_path, monkeypatch):
 
     seen = []
 
-    def fake_transcribe_track(model, session_dir, track, config, paths):
+    def fake_transcribe_track(model, session_dir, track, config, paths, gated_paths=None):
         seen.append(track["speaker"])
         return []
 

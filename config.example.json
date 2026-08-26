@@ -1,9 +1,7 @@
 {
   "session_name": "dnd_2",
   "language": "ru",
-
   "quality_profile": "balanced",
-
   "ai": {
     "enabled": true,
     "provider": "anthropic",
@@ -14,25 +12,20 @@
     "max_output_tokens": 8000,
     "concurrency": 2
   },
-
   "pdf": {
     "enabled": true,
     "assets_dir": null,
     "campaign_title": "Хроники кампании",
     "subtitle": "D&D · Forgotten Realms"
   },
-
   "transcription_backend": "mlx",
   "model_size": "mlx-community/whisper-large-v3-turbo",
-
   "device": "cpu",
   "compute_type": "int8",
-
   "use_vad": true,
   "vad_min_silence_ms": 800,
   "beam_size": 5,
   "condition_on_previous_text": false,
-
   "decode": {
     "initial_prompt": "Запись настольной игры Dungeons & Dragons на русском языке. Мастер ведёт партию: Ангрон, Антернер, Шиян, Гай Гексан, Алкюр Септик. — Бросайте инициативу. — Кидаю к20, выпало семнадцать, с модификатором — двадцать два. Ангрон атакует гоблина и наносит урон. Шиян делает проверку восприятия с преимуществом. Алкюр Септик читает заклинание, спасбросок Ловкости. Что вы делаете дальше?",
     "condition_on_previous_text": false,
@@ -41,48 +34,77 @@
     "no_speech_threshold": 0.6,
     "hallucination_silence_threshold": 2.0
   },
-
   "preprocess": {
     "enabled": true,
     "sample_rate": 16000,
     "channels": 1,
-
     "highpass_enabled": true,
     "highpass_hz": 80,
-
     "lowpass_enabled": false,
     "lowpass_hz": 12000,
-
     "denoise_enabled": true,
     "denoise_noise_floor_db": -25,
-
     "noise_gate_enabled": true,
     "noise_gate_threshold_db": -45,
     "noise_gate_ratio": 6,
     "noise_gate_attack_ms": 10,
     "noise_gate_release_ms": 250,
-
     "loudnorm_enabled": false,
     "loudnorm_i": -18,
     "loudnorm_tp": -2,
     "loudnorm_lra": 11
   },
-
+  "cross_gate": {
+    "enabled": true,
+    "window_ms": 30,
+    "keep_margin_db": 6.0,
+    "activity_floor_db": -55.0,
+    "dilate_windows": 2
+  },
   "master_mix": "dnd_2-001.wav",
-
   "dm_speaker": "Данжен Мастер",
-  "audio_extensions": [".wav"],
-  "exclude": [],
-
-  "tracks": [
-    {"file": "dnd_2-Данжен Мастер.wav", "speaker": "Данжен Мастер", "character": "ДМ", "priority": 100},
-    {"file": "dnd_2-Дима. Ангрон.wav", "speaker": "Дима", "character": "Ангрон", "priority": 50},
-    {"file": "dnd_2-Антернер.wav", "speaker": "Антернер", "character": "Антернер", "priority": 50},
-    {"file": "dnd_2-Шиян.wav", "speaker": "Шиян", "character": "Шиян", "priority": 50},
-    {"file": "dnd_2-Гай Гексан.wav", "speaker": "Гай Гексан", "character": "Гай Гексан", "priority": 50},
-    {"file": "dnd_2-Алкюр Септик.wav", "speaker": "Алкюр Септик", "character": "Алкюр Септик", "priority": 50}
+  "audio_extensions": [
+    ".wav"
   ],
-
+  "exclude": [],
+  "tracks": [
+    {
+      "file": "dnd_2-Данжен Мастер.wav",
+      "speaker": "Данжен Мастер",
+      "character": "ДМ",
+      "priority": 100
+    },
+    {
+      "file": "dnd_2-Дима. Ангрон.wav",
+      "speaker": "Дима",
+      "character": "Ангрон",
+      "priority": 50
+    },
+    {
+      "file": "dnd_2-Антернер.wav",
+      "speaker": "Антернер",
+      "character": "Антернер",
+      "priority": 50
+    },
+    {
+      "file": "dnd_2-Шиян.wav",
+      "speaker": "Шиян",
+      "character": "Шиян",
+      "priority": 50
+    },
+    {
+      "file": "dnd_2-Гай Гексан.wav",
+      "speaker": "Гай Гексан",
+      "character": "Гай Гексан",
+      "priority": 50
+    },
+    {
+      "file": "dnd_2-Алкюр Септик.wav",
+      "speaker": "Алкюр Септик",
+      "character": "Алкюр Септик",
+      "priority": 50
+    }
+  ],
   "hallucination_filter": {
     "enabled": true,
     "mode": "balanced",
@@ -103,9 +125,16 @@
       "Питер Каватый"
     ],
     "keep_short_reactions": true,
-    "short_reaction_max_chars": 8
+    "short_reaction_max_chars": 8,
+    "blacklist_exact": [
+      "Спасибо.",
+      "Спасибо",
+      "Всем спасибо",
+      "Пока.",
+      "До встречи.",
+      "До новых встреч."
+    ]
   },
-
   "dedupe": {
     "enabled": true,
     "min_text_len": 20,
@@ -114,12 +143,10 @@
     "search_back_segments": 40,
     "prefer_louder_by_db": 3.0
   },
-
   "postprocess": {
     "merge_adjacent_same_speaker": true,
     "merge_max_gap_sec": 1.1,
     "merge_max_merged_chars": 420
   },
-
   "chunk_minutes": 10
 }

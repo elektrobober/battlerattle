@@ -452,6 +452,132 @@ def maybe_limit_audio(input_path: Path, track: dict[str, Any], config: dict[str,
     return output_path
 
 
+DEFAULT_CROSS_GATE = {
+    "enabled": True,
+    "window_ms": 30,
+    "keep_margin_db": 6.0,
+    "activity_floor_db": -55.0,
+    "dilate_windows": 2,
+}
+
+
+def _wav_pcm16_mono_info(path: Path) -> tuple[int, int] | None:
+    """(framerate, nframes) для 16-бит моно WAV, иначе None."""
+    try:
+        with wave.open(str(path), "rb") as wf:
+            if wf.getsampwidth() != 2 or wf.getnchannels() != 1:
+                return None
+            return wf.getframerate(), wf.getnframes()
+    except (wave.Error, OSError, EOFError):
+        return None
+
+
+def _rms_envelope_db(path: Path, win: int, block_windows: int = 4096) -> np.ndarray:
+    """RMS-огибающая в dBFS по окнам win сэмплов. Стриминг, память O(block)."""
+    out: list[np.ndarray] = []
+    with wave.open(str(path), "rb") as wf:
+        while True:
+            raw = wf.readframes(win * block_windows)
+            if not raw:
+                break
+            a = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+            n = len(a) // win
+            if n == 0:
+                break
+            r = a[: n * win].reshape(n, win)
+            rms = np.sqrt((r * r).mean(axis=1)) + 1e-10
+            out.append(20.0 * np.log10(rms))
+    if not out:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(out)
+
+
+def cross_track_gate_audio(
+    inputs: list[tuple[str, Path]], config: dict[str, Any], paths: Paths
+) -> dict[str, Path]:
+    """Cross-track gating по синхронным дорожкам PodTrak.
+
+    Дорожки писаны сэмпл-в-сэмпл синхронно, поэтому в каждый момент времени можно
+    спросить: чей микрофон громче всех? Окно остаётся на дорожке, только если она
+    лидер или в пределах keep_margin_db от лидера (честные перебивания живут);
+    остальное — просачивание чужого голоса — уводится в ноль. Убивает дубли в
+    источнике, а не текстовым дедупом постфактум. См. docs/asr_audit_2026-08.md § 2.3.
+
+    Возвращает {file_name: путь к гейтнутому wav}. Пустой dict = гейтинг не применён.
+    """
+    gate_cfg = {**DEFAULT_CROSS_GATE, **(config.get("cross_gate", {}) or {})}
+
+    infos = {name: _wav_pcm16_mono_info(p) for name, p in inputs}
+    if any(v is None for v in infos.values()):
+        bad = [n for n, v in infos.items() if v is None]
+        logger.warning(f"Cross-gate: пропускаю — не 16-бит моно WAV (нужен preprocess.enabled): {bad}")
+        return {}
+    rates = {v[0] for v in infos.values()}
+    if len(rates) != 1:
+        logger.warning(f"Cross-gate: пропускаю — разные sample rate: {rates}")
+        return {}
+    sr = rates.pop()
+
+    win = max(1, int(sr * float(gate_cfg.get("window_ms", 30)) / 1000.0))
+    margin = float(gate_cfg.get("keep_margin_db", 6.0))
+    floor = float(gate_cfg.get("activity_floor_db", -55.0))
+    dilate = max(0, int(gate_cfg.get("dilate_windows", 2)))
+
+    sig = stable_hash({
+        "cross_gate": gate_cfg,
+        "files": sorted((name, file_fingerprint(p)) for name, p in inputs),
+    })
+
+    out_paths: dict[str, Path] = {}
+    todo: list[tuple[str, Path, Path]] = []
+    for name, p in inputs:
+        out = paths.preprocess_dir / f"{safe_name(Path(name).stem)}.{sig}.gated.wav"
+        out_paths[name] = out
+        if not (out.exists() and out.stat().st_size > 44):
+            todo.append((name, p, out))
+    if not todo:
+        logger.info("Cross-gate кэш: все дорожки готовы")
+        return out_paths
+
+    logger.info(f"Cross-gate: окно {win / sr * 1000:.0f} мс, запас {margin} dB, пол {floor} dB")
+    envs = [_rms_envelope_db(p, win) for _, p in inputs]
+    n = min(len(e) for e in envs)
+    if n == 0:
+        logger.warning("Cross-gate: пустые дорожки, пропускаю")
+        return {}
+    E = np.stack([e[:n] for e in envs])
+    leader = E.max(axis=0)
+    quiet = leader <= floor  # никто не говорит — не трогаем
+    keep = (E >= leader - margin) | quiet[None, :]
+
+    if dilate:
+        kernel = np.ones(2 * dilate + 1)
+        keep = np.stack([np.convolve(k.astype(np.float32), kernel, "same") > 0 for k in keep])
+
+    centers = (np.arange(n, dtype=np.float64) + 0.5) * win
+    row_by_name = {name: i for i, (name, _) in enumerate(inputs)}
+    for name, src, out in todo:
+        keepf = keep[row_by_name[name]].astype(np.float32)
+        zeroed = 1.0 - float(keepf.mean())
+        tmp = out.with_suffix(".tmp.wav")
+        with wave.open(str(src), "rb") as win_f, wave.open(str(tmp), "wb") as wout:
+            wout.setnchannels(1)
+            wout.setsampwidth(2)
+            wout.setframerate(sr)
+            pos = 0
+            while True:
+                raw = win_f.readframes(win * 4096)
+                if not raw:
+                    break
+                a = np.frombuffer(raw, dtype="<i2").astype(np.float32)
+                gains = np.interp(pos + np.arange(len(a), dtype=np.float64), centers, keepf)
+                wout.writeframes((a * gains).astype("<i2").tobytes())
+                pos += len(a)
+        tmp.replace(out)
+        logger.info(f"  {name}: убрано {zeroed * 100:.0f}% таймлайна (просачивание)")
+    return out_paths
+
+
 def get_backend(config: dict[str, Any]) -> str:
     return str(config.get("transcription_backend") or config.get("backend") or "faster_whisper").strip().lower()
 
@@ -485,7 +611,7 @@ def resolve_decode_options(cfg: dict[str, Any], backend: str) -> dict[str, Any]:
 
 
 def normalize_segment_from_mlx(seg: dict[str, Any]) -> dict[str, Any]:
-    return {
+    row = {
         "start": float(seg.get("start", 0.0) or 0.0),
         "end": float(seg.get("end", seg.get("start", 0.0) or 0.0) or 0.0),
         "text": (seg.get("text") or "").strip(),
@@ -493,6 +619,59 @@ def normalize_segment_from_mlx(seg: dict[str, Any]) -> dict[str, Any]:
         "no_speech_prob": seg.get("no_speech_prob"),
         "compression_ratio": seg.get("compression_ratio"),
     }
+    words = seg.get("words") or None
+    if words:
+        row["words"] = [
+            {"start": float(w.get("start", 0.0)), "end": float(w.get("end", 0.0)), "word": (w.get("word") or "")}
+            for w in words
+        ]
+    return row
+
+
+MLX_SAMPLE_RATE = 16000
+
+
+def compute_vad_regions(audio: "np.ndarray", config: dict[str, Any]) -> list[tuple[float, float]]:
+    """Речевые регионы (секунды) через Silero VAD, который лежит внутри faster-whisper.
+
+    Возвращает список (start, end) на исходном таймлайне. Пустой список = речи нет.
+    """
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+    opts = VadOptions(
+        min_silence_duration_ms=int(config.get("vad_min_silence_ms", 800)),
+        speech_pad_ms=int(config.get("vad_speech_pad_ms", 250)),
+        min_speech_duration_ms=int(config.get("vad_min_speech_ms", 90)),
+    )
+    stamps = get_speech_timestamps(audio, opts, sampling_rate=MLX_SAMPLE_RATE)
+    merge_gap = float(config.get("vad_merge_gap_sec", 0.3))
+    regions: list[tuple[float, float]] = []
+    for st in stamps:
+        s, e = st["start"] / MLX_SAMPLE_RATE, st["end"] / MLX_SAMPLE_RATE
+        if regions and s - regions[-1][1] <= merge_gap:
+            regions[-1] = (regions[-1][0], e)
+        else:
+            regions.append((s, e))
+    return regions
+
+
+def bucket_vad_regions(regions: list[tuple[float, float]], bucket_sec: float) -> list[list[tuple[float, float]]]:
+    """Группирует регионы в бакеты по ~bucket_sec таймлайна.
+
+    Каждый бакет уходит отдельным вызовом transcribe() — так initial_prompt
+    переинжектится в каждый (иначе он живёт только первое 30-сек окно, см.
+    docs/asr_audit_2026-08.md § 2.2).
+    """
+    buckets: list[list[tuple[float, float]]] = []
+    cur: list[tuple[float, float]] = []
+    for s, e in regions:
+        if cur and e - cur[0][0] > bucket_sec:
+            buckets.append(cur)
+            cur = []
+        cur.append((s, e))
+    if cur:
+        buckets.append(cur)
+    return buckets
 
 
 def run_mlx_transcribe(audio_path: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -503,16 +682,77 @@ def run_mlx_transcribe(audio_path: Path, config: dict[str, Any]) -> list[dict[st
     language = config.get("language", "ru")
     logger.info(f"  backend: mlx-whisper, model: {model}")
 
-    # mlx-whisper не использует faster-whisper VAD. Очистку делаем через preprocess/noise gate.
-    result = mlx_whisper.transcribe(
-        str(audio_path),
-        path_or_hf_repo=model,
-        language=language,
-        verbose=False,
-        **resolve_decode_options(config, "mlx"),
+    if config.get("beam_size"):
+        logger.info("  note: beam_size игнорируется на MLX — beam search в mlx-whisper не реализован")
+
+    decode_opts = resolve_decode_options(config, "mlx")
+    word_ts = bool((config.get("decode") or {}).get("word_timestamps", True))
+
+    # VAD: находим речевые регионы и декодируем только их через штатный clip_timestamps.
+    # Таймкоды при этом остаются на исходном таймлайне бакета — пересчёт только на offset бакета.
+    audio = None
+    if config.get("use_vad", True):
+        try:
+            from mlx_whisper.audio import load_audio
+
+            audio = load_audio(str(audio_path))
+        except Exception as e:
+            logger.warning(f"  VAD: не смог загрузить аудио ({e}); декодирую без VAD")
+            audio = None
+
+    if audio is None:
+        result = mlx_whisper.transcribe(
+            str(audio_path),
+            path_or_hf_repo=model,
+            language=language,
+            verbose=False,
+            word_timestamps=word_ts,
+            **decode_opts,
+        )
+        return [normalize_segment_from_mlx(s) for s in (result.get("segments") or [])]
+
+    duration = len(audio) / MLX_SAMPLE_RATE
+    regions = compute_vad_regions(audio, config)
+    if not regions:
+        logger.info("  VAD: речи не найдено, дорожка пуста")
+        return []
+
+    speech = sum(e - s for s, e in regions)
+    bucket_sec = float(config.get("vad_bucket_minutes", 10)) * 60.0
+    buckets = bucket_vad_regions(regions, bucket_sec)
+    logger.info(
+        f"  VAD: речь {speech:.0f} с из {duration:.0f} с"
+        f" ({speech / max(duration, 1e-9) * 100:.0f}%), регионов {len(regions)}, вызовов {len(buckets)}"
     )
-    segments = result.get("segments") or []
-    return [normalize_segment_from_mlx(s) for s in segments]
+
+    segments: list[dict[str, Any]] = []
+    for regs in buckets:
+        b0 = regs[0][0]
+        b1 = regs[-1][1]
+        i0 = int(b0 * MLX_SAMPLE_RATE)
+        i1 = min(len(audio), int(math.ceil(b1 * MLX_SAMPLE_RATE)))
+        clips: list[float] = []
+        for s, e in regs:
+            clips.append(max(0.0, s - b0))
+            clips.append(min(b1 - b0, e - b0))
+        result = mlx_whisper.transcribe(
+            audio[i0:i1],
+            path_or_hf_repo=model,
+            language=language,
+            verbose=False,
+            word_timestamps=word_ts,
+            clip_timestamps=clips,
+            **decode_opts,
+        )
+        for seg in result.get("segments") or []:
+            row = normalize_segment_from_mlx(seg)
+            row["start"] += b0
+            row["end"] += b0
+            for w in row.get("words") or []:
+                w["start"] += b0
+                w["end"] += b0
+            segments.append(row)
+    return segments
 
 
 def run_faster_whisper_transcribe(model: Any, audio_path: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -521,7 +761,7 @@ def run_faster_whisper_transcribe(model: Any, audio_path: Path, config: dict[str
         vad_filter=bool(config.get("use_vad", True)),
         vad_parameters={"min_silence_duration_ms": int(config.get("vad_min_silence_ms", 800))},
         beam_size=int(config.get("beam_size", 5)),
-        word_timestamps=False,
+        word_timestamps=bool((config.get("decode") or {}).get("word_timestamps", False)),
     )
     kwargs.update(resolve_decode_options(config, "faster_whisper"))
     segments, info = model.transcribe(str(audio_path), **kwargs)
@@ -689,6 +929,11 @@ def transcription_cache_signature(
         "language": config.get("language", "ru"),
         "use_vad": config.get("use_vad", True),
         "vad_min_silence_ms": config.get("vad_min_silence_ms", 800),
+        "vad_speech_pad_ms": config.get("vad_speech_pad_ms", 250),
+        "vad_min_speech_ms": config.get("vad_min_speech_ms", 90),
+        "vad_merge_gap_sec": config.get("vad_merge_gap_sec", 0.3),
+        "vad_bucket_minutes": config.get("vad_bucket_minutes", 10),
+        "word_timestamps": (config.get("decode") or {}).get("word_timestamps", True),
         "beam_size": config.get("beam_size", 5),
         "condition_on_previous_text": config.get("condition_on_previous_text", False),
         "decode_options": resolve_decode_options(config, backend),
@@ -699,7 +944,7 @@ def transcription_cache_signature(
     }
 
 
-def transcribe_track(model: Any, session_dir: Path, track: dict[str, Any], config: dict[str, Any], paths: Paths) -> list[dict[str, Any]]:
+def transcribe_track(model: Any, session_dir: Path, track: dict[str, Any], config: dict[str, Any], paths: Paths, gated_paths: dict[str, Path] | None = None) -> list[dict[str, Any]]:
     file_name = track["file"]
     speaker = track.get("speaker") or track.get("character") or file_name
     character = track.get("character") or speaker
@@ -713,6 +958,8 @@ def transcribe_track(model: Any, session_dir: Path, track: dict[str, Any], confi
     backend = get_backend(config)
     base_transcription_path = preprocess_track_audio(session_dir, track, config, paths)
     transcription_path = maybe_limit_audio(base_transcription_path, track, config, paths)
+    if gated_paths and file_name in gated_paths:
+        transcription_path = gated_paths[file_name]
 
     fingerprint = file_fingerprint(audio_path)
     transcription_fingerprint = file_fingerprint(transcription_path)
@@ -776,6 +1023,8 @@ def transcribe_track(model: Any, session_dir: Path, track: dict[str, Any], confi
             "duplicate_status": "raw",
             "deduped_from": [],
         }
+        if seg.get("words"):
+            row["words"] = seg["words"]
         rows.append(row)
         logger.debug(f"  [{fmt_hms(start)}] {text}")
 
@@ -851,16 +1100,34 @@ def transcribe_all(session_dir: Path, config: dict[str, Any], paths: Paths) -> l
             raise RuntimeError("Не установлен mlx-whisper. Выполни: pip install mlx-whisper")
         logger.info(f"Использую MLX backend для Apple Silicon: {config.get('mlx_model') or config.get('model_size')}")
         if config.get("use_vad", True):
-            logger.info("  note: VAD faster-whisper в MLX не применяется; чистку делает preprocess/noise gate.")
+            logger.info("  note: MLX + Silero VAD: декодируются только речевые регионы (clip_timestamps)")
+        else:
+            logger.info("  note: use_vad=false — MLX декодирует файл сплошняком; чистка только preprocess/noise gate")
     else:
         raise RuntimeError(f"Неизвестный transcription_backend: {backend}")
 
     rows: list[dict[str, Any]] = []
     tracks = discover_tracks(session_dir, config)
+
+    gated_paths: dict[str, Path] = {}
+    gate_cfg = {**DEFAULT_CROSS_GATE, **(config.get("cross_gate", {}) or {})}
+    if gate_cfg.get("enabled", True) and len(tracks) >= 2:
+        inputs: list[tuple[str, Path]] = []
+        for i, track in enumerate(tracks):
+            tr = dict(track)
+            tr["index"] = i
+            if not (session_dir / tr["file"]).exists():
+                continue
+            pre = preprocess_track_audio(session_dir, tr, config, paths)
+            lim = maybe_limit_audio(pre, tr, config, paths)
+            inputs.append((tr["file"], lim))
+        if len(inputs) >= 2:
+            gated_paths = cross_track_gate_audio(inputs, config, paths)
+
     for i, track in enumerate(tracks):
         track = dict(track)
         track["index"] = i
-        rows.extend(transcribe_track(model, session_dir, track, config, paths))
+        rows.extend(transcribe_track(model, session_dir, track, config, paths, gated_paths=gated_paths))
 
     rows.sort(key=lambda r: (r["start"], r["end"], r.get("speaker", "")))
     suffix = "_test" if (config.get("limit_minutes") or config.get("__limit_minutes")) else ""
@@ -898,11 +1165,52 @@ def is_repeated_word_garbage(text: str) -> bool:
     return False
 
 
+# Типичный мусор тишины Whisper на русском: субтитровые кредиты и артефакты обучения
+# на YouTube-датасетах. Используется, когда конфиг не задаёт свой blacklist.
+DEFAULT_HALLUCINATION_BLACKLIST = [
+    "Продолжение следует",
+    "Субтитры создавал",
+    "Субтитры сделал",
+    "Субтитры делал",
+    "Добавил субтитры",
+    "Редактор субтитров",
+    "Корректор субтитров",
+    "DimaTorzok",
+    "Питер Каватый",
+    "Спасибо за просмотр",
+    "Подписывайтесь на канал",
+]
+
+
+# Реплики, которые Whisper генерирует из тишины ЦЕЛИКОМ. Матчатся только как
+# полный текст сегмента: настоящая речь со словом «спасибо» внутри не страдает.
+DEFAULT_EXACT_HALLUCINATIONS = [
+    "Спасибо.",
+    "Спасибо",
+    "Спасибо!",
+    "Всем спасибо",
+    "Всем спасибо.",
+    "Пока.",
+    "Пока!",
+    "До встречи.",
+    "До новых встреч.",
+]
+
+
 def is_blacklisted_hallucination(text: str, cfg: dict[str, Any]) -> bool:
     norm = normalize_text_for_filter(text)
     hf = cfg.get("hallucination_filter", {}) or {}
-    for phrase in hf.get("blacklist", []) or []:
+    blacklist = hf.get("blacklist")
+    if blacklist is None:
+        blacklist = DEFAULT_HALLUCINATION_BLACKLIST
+    for phrase in blacklist or []:
         if normalize_text_for_filter(str(phrase)) in norm:
+            return True
+    exact = hf.get("blacklist_exact")
+    if exact is None:
+        exact = DEFAULT_EXACT_HALLUCINATIONS
+    for phrase in exact or []:
+        if normalize_text_for_filter(str(phrase)) == norm:
             return True
     return False
 
@@ -1233,7 +1541,7 @@ def write_quality_report(raw: list[dict[str, Any]], clean: list[dict[str, Any]],
         "",
         f"- quality_profile: `{cfg.get('quality_profile', 'balanced')}`",
         f"- backend: `{get_backend(cfg)}`",
-        f"- model: `{cfg.get('model_size')}`",
+        f"- model: `{(cfg.get('mlx_model') or cfg.get('model_size')) if get_backend(cfg) in _MLX_BACKENDS else cfg.get('model_size')}`",
         f"- raw реплик: **{len(raw)}**",
         f"- clean реплик: **{len(clean)}**",
         f"- склеено/удалено дублей: **{max(0, len(raw) - len(clean))}**",
